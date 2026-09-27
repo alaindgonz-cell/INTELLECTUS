@@ -45,6 +45,9 @@ type caseRun struct {
 	duration   time.Duration
 	hostUID    uint32
 	nproc      int // RLIMIT_NPROC the sandbox was launched with
+	// setupRetries counts relaunches after bwrap failed to create the
+	// sandbox for lack of RLIMIT_NPROC budget (see setupRetryDelays).
+	setupRetries int
 }
 
 // capBuf keeps the first limit bytes written and counts the rest.
@@ -89,15 +92,50 @@ func (w *Worker) release(uid uint32) { w.slots <- uid }
 
 // runCase launches one sandboxed interpreter and waits for it.
 func (w *Worker) runCase(ctx context.Context, spec caseSpec) caseRun {
+	uid, err := w.acquire(ctx)
+	if err != nil {
+		return caseRun{aborted: err}
+	}
+	defer w.release(uid)
+	var r caseRun
+	for attempt := 0; ; attempt++ {
+		r = w.launch(ctx, spec, uid)
+		if !setupRefusedForNproc(r) || attempt >= len(setupRetryDelays) {
+			r.setupRetries = attempt
+			return r
+		}
+		select {
+		case <-time.After(setupRetryDelays[attempt]):
+		case <-ctx.Done():
+			return caseRun{aborted: ctx.Err()}
+		}
+	}
+}
+
+// setupRetryDelays bound the relaunches of a sandbox that bwrap could not
+// even create because the host uid's RLIMIT_NPROC budget was exhausted
+// (typically by a fork bomb in a concurrent sandbox sharing the uid, which
+// holds the budget only until it is killed). No candidate code has run in
+// such an attempt, so relaunching is safe; if the budget stays exhausted
+// the case ends ERROR.
+var setupRetryDelays = []time.Duration{50 * time.Millisecond, 100 * time.Millisecond, 200 * time.Millisecond, 400 * time.Millisecond, 800 * time.Millisecond}
+
+// setupRefusedForNproc reports a bwrap setup failure caused by EAGAIN from
+// clone/fork (bwrap's own message, printed before the interpreter exists).
+func setupRefusedForNproc(r caseRun) bool {
+	if r.startErr != nil || r.aborted != nil || r.timedOut || r.exitCode != 1 || len(r.result) != 0 {
+		return false
+	}
+	msg := string(r.stderr.buf)
+	return strings.HasPrefix(msg, "bwrap: ") && strings.Contains(msg, "Resource temporarily unavailable") &&
+		strings.Count(msg, "\n") <= 1
+}
+
+// launch runs one sandbox attempt as host uid.
+func (w *Worker) launch(ctx context.Context, spec caseSpec, uid uint32) caseRun {
 	var r caseRun
 	r.stdout.limit = w.cfg.MaxOutputBytes
 	r.stderr.limit = w.cfg.MaxOutputBytes
-	uid, err := w.acquire(ctx)
-	if err != nil {
-		r.aborted = err
-		return r
-	}
-	defer w.release(uid)
 	r.hostUID = uid
 
 	caseCtx, cancel := context.WithTimeout(ctx, spec.timeout)

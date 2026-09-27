@@ -29,9 +29,19 @@ runner := &runner.ProtectedRunner{Core: c, Session: s, Worker: w}
 - The engine is root and some directory on the path to `WorkRoot` is not traversable by others. bwrap opens bind sources as the unprivileged uid.
 - A limit is out of range.
 
+## Root mode and non-root mode
+
+- **Root** (the engine's euid is 0; strongest). Each sandbox runs as a dedicated, otherwise unused host uid: 65534, or one from `ExtraUIDs`. RLIMIT_NPROC is an absolute `MaxProcs` for that uid.
+- **Non-root** (e.g. `intellectus serve` run by a normal user). The sandbox runs as the **user's own host uid**. bwrap maps it to 65534 inside a new user namespace; unprivileged user namespaces are required. RLIMIT_NPROC is **relative**: the tasks (threads) the user's real uid owns at launch, counted from `/proc/*/status`, plus `MaxProcs`. A fork bomb therefore still gets only about `MaxProcs` extra tasks. The guarantees that differ:
+  - **The bound is racy.** Tasks the user starts meanwhile shrink the sandbox's headroom; tasks that exit free budget the sandbox may take (the self-test accepts up to `MaxProcs + 32`). A fork bomb can also consume budget the user's own new processes need until the case is killed. RLIMIT_NPROC does not apply to processes already running.
+  - **Hiding host files relies only on namespaces and mounts.** The sandbox's host uid owns the user's files, so file permissions would not stop it. It sees only what is bind-mounted: read-only `/usr`, `/etc/ld.so.cache`, `/work` and the driver. `host_files_hidden` checks the user's paths (the repository, the canary) by that mechanism. As a result, a kernel escape out of the mount namespace would have the user's full file access, not nobody's.
+  - The rest is unchanged: namespaces, no capabilities, cleared environment, fd hygiene, other rlimits, timeouts, synchronous teardown.
+
+In both modes, several sandboxes share one host uid's budget when there are fewer distinct uids than `MaxParallel` (always the case in non-root mode). A fork bomb can then make bwrap fail to create a *concurrently launching* sandbox (`bwrap: Creating new namespace failed: Resource temporarily unavailable`). No candidate code has run in that attempt, so the launch is retried after 50, 100, 200, 400 and 800 ms (`setupRetryDelays`). If the budget stays exhausted the case is ERROR, never PASS.
+
 ## How one case runs
 
-The engine is root on the verified host. It runs the following (flags as printed by the tests; `<RUNDIR>` is a fresh `MkdirTemp` under `WorkRoot`):
+The engine is root on the verified host. (In non-root mode, the setuid/setgid/setgroups step is skipped and `--nproc` is `<tasks of the real uid at launch> + 64`.) It runs the following (flags as printed by the tests; `<RUNDIR>` is a fresh `MkdirTemp` under `WorkRoot`):
 
 ```
 setuid/setgid 65534, setgroups([]), setpgid, PDEATHSIG=SIGKILL, env = {}, cwd = /,
@@ -157,7 +167,7 @@ The candidate module is untrusted and adversarial. It runs with the sandbox's fu
 - **RLIMIT_NPROC is accounted by the kernel per *host* uid across all namespaces.** This was verified: two sandboxes as the same host uid share one budget, and a second sandbox failed with `bwrap: Can't fork for pid 1: Resource temporarily unavailable` while the first held 15 of 20. With distinct host uids both succeeded.
   - A persistent fork bomb can therefore make concurrently running cases of other candidates ERROR. That is a denial of service, never a false PASS. The same applies to any other host process running as that uid.
   - Mitigation: give `ExtraUIDs` so there are ≥ `MaxParallel` distinct, otherwise unused uids.
-- **Not root.** When the engine is not root, sandboxes run as the engine's own uid. RLIMIT_NPROC then counts all of that user's processes and will usually make every case ERROR. `SelfTest` fails closed. Run the engine as root, so it drops to a dedicated uid, or as a dedicated service user.
+- **Non-root mode is weaker.** See "Root mode and non-root mode": the process bound is relative and racy, the sandbox's host uid is the user's own, so hiding the user's files relies only on namespaces and bind mounts, and all sandboxes share the user's budget. Running the engine as root, so that it drops to a dedicated uid, or as a dedicated service user with few processes gives the stronger guarantees.
 - **Run directories on the host** (0755/0644 under `WorkRoot`) are readable by other local users while a run is in progress.
 - **Platform.** Linux only. Requires bwrap ≥ 0.8 (`--disable-userns`; only 0.9.0 was verified), util-linux `prlimit`, and unprivileged user namespaces. AppArmor userns restrictions, as on Ubuntu 24.04, or `max_user_namespaces=0` make every sandbox fail, so `SelfTest` fails closed. Split-usr layouts are handled by bind mounts but were not exercised.
 
@@ -223,3 +233,20 @@ Behaviour cases:
 | `no_inherited_fds` | `[0 1 2 3]`, although the test process holds a non-CLOEXEC fd. |
 
 A vacuous self-test configuration fails closed: a forbidden path that does not exist on the host, or a canary variable that is not set.
+
+### Non-root mode, verified the same day
+
+I created a user with `useradd -m intellectus-test` (uid 1001, gid 1002). As root I built the test binary with `go test -c -race`, then ran it as that user with `su intellectus-test -c 'cd …/engine/sandbox && /tmp/intellectus-sandbox.test'`. Unprivileged user namespaces and bwrap work for that user on this host.
+
+- **The full suite passes** twice with the user owning about 12 tasks, and twice with 100 extra `sleep` processes (104 tasks).
+- **Without the relative limit, sandboxes cannot start.** Under that load, `prlimit --nproc=64 -- bwrap …` fails with `bwrap: Creating new namespace failed: Resource temporarily unavailable`.
+- **SelfTest passes all 13 probes.** Highlights:
+  - Host view of the sandbox processes: uid 1001.
+  - `process_limit_enforced`: RELATIVE RLIMIT_NPROC 76 (12 tasks + 64), and 177 under load (113 + 64); the fork loop stopped after 62 children with EAGAIN in both cases.
+  - `host_files_hidden`: ENOENT for `/home/user/INTELLECTUS` and the test user's canary.
+  - `workspace_read_only`: EROFS everywhere, including `/work` files, which the uid owns on the host.
+- **T19 under load, before the setup retry:**
+  - 1 of 12 runs failed. Two cases were ERROR because bwrap could not create their namespace while the concurrent fork-bomb case held the budget.
+  - It was never a false PASS.
+- **T19 under load, after the setup retry:** 15 of 15 runs pass.
+- **Root path:** `go test -race ./sandbox/` stays green.

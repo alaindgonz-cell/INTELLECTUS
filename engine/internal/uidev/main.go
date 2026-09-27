@@ -145,6 +145,7 @@ type TaskSummary struct {
 	FailedCandidates int    `json:"failed_candidates"`
 	Candidates       int    `json:"candidates"`
 	Phase            string `json:"phase"`
+	Running          bool   `json:"running"`
 	UpdatedTS        int64  `json:"updated_ts"`
 }
 
@@ -370,6 +371,54 @@ func pageSizeScenario() *scenario {
 		a0Fail:  map[string]string{"plus": "returned 1", "space": "returned 5", "arabic_indic": "returned 3"},
 		repairNote: "Repair: int() alone accepts '+1', ' 5' and '٣' (Unicode digits), so A0 let them through.\n" +
 			"A1 requires a full match of [0-9]{1,3} before converting, and wires parse_page_size into paginate().",
+	}
+}
+
+const pageNumberA0 = `def parse_page_number(raw):
+    value = int(raw)
+    if value < 1 or len(raw) > 4:
+        raise ValueError("page number must be 1..9999")
+    return value
+`
+
+const pageNumberA1 = `"""Strict page-number parsing."""
+import re
+
+_PAGE_NUMBER = re.compile(r"[0-9]{1,4}")
+
+
+def parse_page_number(raw):
+    """Return raw as an int if it is 1-4 ASCII digits with value >= 1."""
+    if not isinstance(raw, str) or not _PAGE_NUMBER.fullmatch(raw):
+        raise ValueError("page number must be 1-4 ASCII digits")
+    value = int(raw)
+    if value < 1:
+        raise ValueError("page number must be >= 1")
+    return value
+`
+
+// pageNumberScenario backs the seeded task that a restart interrupted.
+func pageNumberScenario() *scenario {
+	return &scenario{
+		title:       "Strict page-number parsing",
+		requirement: "parse_page_number(raw) accepts only strings of 1–4 ASCII digits whose value is at least 1 and returns it as an int; anything else raises ValueError.",
+		entry:       Entrypoint{Language: "python", Path: "src/page_number.py", Function: "parse_page_number"},
+		cases: []Case{
+			{"ok_1", "1", returns(1)},
+			{"ok_42", "42", returns(42)},
+			{"ok_9999", "9999", returns(9999)},
+			{"zero", "0", raises("ValueError")},
+			{"plus", "+2", raises("ValueError")},
+			{"trailing_space", "3 ", raises("ValueError")},
+			{"empty", "", raises("ValueError")},
+		},
+		plan: "1. Add src/page_number.py with parse_page_number(raw: str) -> int.\n" +
+			"2. Require a full match of 1–4 ASCII digits before converting.\n" +
+			"3. Reject 0.",
+		a0Files:    map[string]string{"src/page_number.py": pageNumberA0},
+		a1Files:    map[string]string{"src/page_number.py": pageNumberA1},
+		a0Fail:     map[string]string{"plus": "returned 2", "trailing_space": "returned 3"},
+		repairNote: "Repair: int() strips whitespace and accepts a sign, so A0 let '+2' and '3 ' through. A1 requires a full match of [0-9]{1,4} first.",
 	}
 }
 
@@ -725,6 +774,13 @@ func (s *server) seed() {
 		{"outcome_observed", "core", "act:22 outcome observed: promoted"},
 		{"postconditions_evaluated", "core", "act:22 postconditions hold (2/2)"},
 		{"task_transition", "core", "task:13 OPEN → COMPLETED (promote_local)"},
+		{"input_recorded", operator, "operator request recorded: strict page-number parsing"},
+		{"node_added", operator, "req:2@1 requirement: parse_page_number accepts 1–4 ASCII digits, value ≥ 1"},
+		{"test_manifest_registered", operator, "manifest m-2 (7 cases) registered"},
+		{"task_opened", operator, "task:31 opened: Strict page-number parsing"},
+		{"proposal_recorded", "role:planner", "prop:32 plan (3 steps)"},
+		{"shutdown_requested", "engine", "engine shutdown requested; task:31 left OPEN (work loop interrupted)"},
+		{"session_opened", "core", "session s-5 opened for engine (after restart)"},
 	}
 	start := now - 3*3600*1000
 	for i, e := range seedEvents {
@@ -764,6 +820,16 @@ func (s *server) seed() {
 	s.tasks = append(s.tasks, t)
 	s.taskByID[t.sum.TaskID] = t
 
+	// task:31 (event #31 above) was interrupted by a restart: OPEN but not running.
+	pn := pageNumberScenario()
+	it := &task{
+		sum:         TaskSummary{TaskID: "task:31", Title: pn.title, Status: "OPEN", MaxRepairs: 3, Phase: "planning", Running: false, UpdatedTS: start + 32*37_000},
+		requirement: pn.requirement, entry: pn.entry, cases: pn.cases, sc: pn, baseRoot: r1,
+		candidates: []Candidate{}, assessments: []Assessment{}, actions: []Action{},
+	}
+	s.tasks = append(s.tasks, it)
+	s.taskByID[it.sum.TaskID] = it
+
 	ago := func(min int) int64 { return now - int64(min)*60*1000 }
 	s.items = []*Item{
 		{ID: "act-boot-1", TS: ago(6), Kind: "system", Status: "ok", Title: "Core started — reducer v2, deductor cross (rust-reference ⇄ mojo)", Detail: "head #" + strconv.Itoa(len(s.events)) + ", replay verified, state digest matches"},
@@ -771,6 +837,7 @@ func (s *server) seed() {
 		{ID: "act-boot-3", TS: ago(5), Kind: "jev", Status: "info", Title: "Jev " + jevModel + " in SHADOW mode — advice is recorded, deterministic routing decides"},
 		{ID: "act-boot-4", TS: ago(4), Kind: "sandbox", Status: "ok", Title: "Sandbox probes passed (6/6) — bwrap", Detail: probeDetail(sb.Probes)},
 		{ID: "act-boot-5", TS: ago(4), Kind: "sandbox", Status: "warn", Title: "Sandbox implementation is not trusted by policy yet — trust it from the Sandbox pill", Detail: sb.ImplementationDigest},
+		{ID: "act-boot-6", TS: ago(3), TaskID: strp("task:31"), Kind: "system", Status: "warn", Title: "task:31 is OPEN but its work loop is not running (interrupted by a restart) — resume it from Tasks"},
 	}
 }
 
@@ -810,6 +877,7 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("GET /api/tasks", s.getTasks)
 	mux.HandleFunc("GET /api/tasks/{id}", s.getTask)
 	mux.HandleFunc("POST /api/tasks/{id}/cancel", s.cancelTask)
+	mux.HandleFunc("POST /api/tasks/{id}/resume", s.resumeTask)
 	mux.HandleFunc("GET /api/tree", s.getTree)
 	mux.HandleFunc("GET /api/diff", s.getDiff)
 	mux.HandleFunc("GET /api/events", s.getEvents)
@@ -1028,7 +1096,7 @@ func (s *server) approveProposal(w http.ResponseWriter, r *http.Request) {
 	card.Status = "approved"
 	card.TaskID = strp(tid)
 	t := &task{
-		sum:         TaskSummary{TaskID: tid, Title: sc.title, Status: "OPEN", MaxRepairs: 3, Phase: "planning", UpdatedTS: nowMS()},
+		sum:         TaskSummary{TaskID: tid, Title: sc.title, Status: "OPEN", MaxRepairs: 3, Phase: "planning", Running: true, UpdatedTS: nowMS()},
 		requirement: sc.requirement, entry: sc.entry, cases: sc.cases, sc: sc, baseRoot: s.status.ApprovedRoot,
 		candidates: []Candidate{}, assessments: []Assessment{}, actions: []Action{},
 	}
@@ -1327,6 +1395,7 @@ func (s *server) runPromotion(t *task, card *ApprovalCard) {
 	act.Postconditions = []Postcondition{{"approved_root_is_candidate", "PASS"}, {"tree_digest_matches", "PASS"}}
 	s.addItem(tid, "core", "ok", "Postconditions hold (2/2) — "+t.sum.TaskID+" completed", "approved_root_is_candidate: PASS\ntree_digest_matches: PASS")
 	t.sum.Status = "COMPLETED"
+	t.sum.Running = false
 	sc := t.sc
 	n := strconv.Itoa(len(sc.cases))
 	a0Failed := 0
@@ -1416,6 +1485,7 @@ func (s *server) rejectApproval(w http.ResponseWriter, r *http.Request) {
 	if card.TaskID != nil {
 		if t := s.taskByID[*card.TaskID]; t != nil && t.sum.Status == "OPEN" {
 			t.sum.Status = "STOPPED"
+			t.sum.Running = false
 			s.event("task_transition", operator, t.sum.TaskID+" OPEN → STOPPED (approval rejected)")
 			s.addMessage("assistant", "", card.TaskID, &ReportCard{Type: "report", TaskID: t.sum.TaskID, Status: "STOPPED", ApprovedRoot: s.status.ApprovedRoot,
 				Lines: []string{"The operator rejected the promotion; the approved tree is unchanged."}, Limitations: standardLimitations()})
@@ -1486,6 +1556,7 @@ func (s *server) cancelTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	t.sum.Status = "CANCELLED"
+	t.sum.Running = false
 	if t.cancel != nil {
 		t.cancel()
 	}
@@ -1506,6 +1577,41 @@ func (s *server) cancelTask(w http.ResponseWriter, r *http.Request) {
 		Lines: []string{"Cancelled by the operator; the approved tree is unchanged."}, Limitations: standardLimitations()})
 	s.touchTask(t, "done")
 	s.pushStatus()
+	writeJSON(w, http.StatusOK, map[string]any{})
+}
+
+// resumeTask restarts the work loop of an OPEN task that is not running
+// (for example one interrupted by a restart).
+func (s *server) resumeTask(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	t, ok := s.taskByID[id]
+	if !ok {
+		writeErr(w, http.StatusNotFound, "unknown task "+id)
+		return
+	}
+	if t.sum.Status != "OPEN" {
+		writeErr(w, http.StatusConflict, "task "+id+" is "+t.sum.Status+", not OPEN")
+		return
+	}
+	if t.sum.Running {
+		writeErr(w, http.StatusConflict, "task "+id+" is already running")
+		return
+	}
+	// Start over from the current approved root; earlier partial work is discarded.
+	t.baseRoot = s.status.ApprovedRoot
+	t.candidates, t.assessments, t.actions = []Candidate{}, []Assessment{}, []Action{}
+	t.sum.RepairsUsed, t.sum.FailedCandidates, t.sum.Candidates = 0, 0, 0
+	t.sum.Running = true
+	ctx, cancel := context.WithCancel(context.Background())
+	t.cancel = cancel
+	s.event("operator_command_accepted", operator, "operator resumed "+id)
+	s.addItem(strp(id), "system", "ok", "Resuming "+id+" — work loop restarted by the operator", "base root: "+t.baseRoot)
+	s.running++
+	s.touchTask(t, "planning")
+	s.pushStatus()
+	go s.runTask(ctx, t)
 	writeJSON(w, http.StatusOK, map[string]any{})
 }
 

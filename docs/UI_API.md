@@ -106,7 +106,9 @@ An item with an existing `id` **replaces** the earlier one (e.g. a
 
 ### Tasks
 
-* `GET /api/tasks` → `{"tasks": [{"task_id", "title", "status", "repairs_used", "max_repairs", "failed_candidates", "candidates": 3, "phase": "coding|testing|routing|awaiting_approval|done|…", "updated_ts"}]}`
+* `GET /api/tasks` → `{"tasks": [{"task_id", "title", "status", "repairs_used", "max_repairs", "failed_candidates", "candidates": 3, "phase": "coding|testing|routing|awaiting_approval|done|…", "running": true, "updated_ts"}]}`
+  — `running` is false when the task's work loop is not running (e.g. an
+  OPEN task interrupted by a restart).
 * `GET /api/tasks/{id}` → task detail:
   `{"task": {…as above}, "requirement": "…", "entrypoint": {…}, "cases": […],
     "candidates": [{"proposal_id", "candidate_root", "acceptance": "PASS|FAIL|…", "details": [CaseDetail…]}],
@@ -115,6 +117,9 @@ An item with an existing `id` **replaces** the earlier one (e.g. a
     "report": {…core task_report…}}`
   where `CaseDetail = {"name", "status", "input", "expected", "observed", "stdout", "stderr", "duration_ms"}`.
 * `POST /api/tasks/{id}/cancel` → `{}`.
+* `POST /api/tasks/{id}/resume` → `{}` — restarts the work loop of an OPEN
+  task that is not running (e.g. after a restart). The UI offers it only
+  when `status == "OPEN"` and `running == false`.
 
 ### Files and diffs
 

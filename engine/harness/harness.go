@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -254,6 +255,18 @@ func (h *Harness) Status(ctx context.Context) (map[string]any, error) {
 	sandbox := h.opt.Sandbox
 	trusted := h.sandboxTrusted(pol)
 	d := h.opt.LLM.Describe()
+	if d.Configured {
+		d.Detail = "" // the UI shows details as notices: only surface problems
+	}
+	jevDetail := h.opt.AdvisorInfo.Detail
+	if strings.HasPrefix(jevDetail, "credentials:") {
+		// Keep caveats (e.g. OpenRouter alpha access), not credential sources.
+		_, rest, _ := strings.Cut(jevDetail, "; ")
+		jevDetail = rest
+	}
+	if !h.opt.AdvisorInfo.Configured || h.opt.Advisor == nil {
+		jevDetail = "Jev is not configured (optional): routing uses the deterministic rules only."
+	}
 	h.mu.Lock()
 	u := h.usage
 	busy := h.chatBusy
@@ -278,7 +291,7 @@ func (h *Harness) Status(ctx context.Context) (map[string]any, error) {
 		"claude": map[string]any{"configured": d.Configured, "provider": d.Provider, "models": d.Models, "detail": d.Detail},
 		"jev": map[string]any{
 			"configured": h.opt.AdvisorInfo.Configured && h.opt.Advisor != nil, "policy_mode": jevMode,
-			"model": h.opt.AdvisorInfo.Model, "provider": h.opt.AdvisorInfo.Provider, "detail": h.opt.AdvisorInfo.Detail,
+			"model": h.opt.AdvisorInfo.Model, "provider": h.opt.AdvisorInfo.Provider, "detail": jevDetail,
 		},
 		"sandbox": map[string]any{
 			"available": sandbox.Available, "verified": sandbox.Verified, "trusted": trusted, "kind": sandbox.Kind,

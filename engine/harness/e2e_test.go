@@ -151,8 +151,15 @@ func TestEndToEndChatToPromotionAndExport(t *testing.T) {
 		case strings.Contains(sys, "You are the Planner"):
 			return fakeapi.AnthropicReply{ToolName: "submit_plan", ToolInput: map[string]any{"summary": "Validate syntax, then range.", "steps": []string{"regex fullmatch", "range check"}}}
 		case strings.Contains(sys, "You are the Coder"):
+			n := coderCalls.Add(1)
+			if n == 1 {
+				// Reproduces a degenerate reply seen live: a placeholder file
+				// instead of the entrypoint. It must be re-asked, not submitted.
+				return fakeapi.AnthropicReply{ToolName: "submit_candidate", ToolInput: map[string]any{
+					"files": []any{map[string]any{"path": "y", "content": "x"}}, "rationale": "placeholder"}}
+			}
 			code := a0
-			if coderCalls.Add(1) > 1 {
+			if n > 2 {
 				code = a1
 			}
 			return fakeapi.AnthropicReply{ToolName: "submit_candidate", ToolInput: map[string]any{
@@ -178,7 +185,7 @@ func TestEndToEndChatToPromotionAndExport(t *testing.T) {
 		Core: proc.Client, Operator: op, LLM: llmClient, Advisor: jevClient,
 		AdvisorInfo: harness.AdvisorInfo{Configured: jd.Configured, Provider: jd.Provider, Model: jd.Model},
 		Worker:      worker, Sandbox: harness.SandboxInfo{Available: true, Verified: true, Kind: worker.Kind(), ImplementationDigest: worker.ImplementationDigest()},
-		Workdir:     workdir, ExportDir: exportDir, CostEstimator: claude.EstimateCostUSD, Logf: t.Logf,
+		Workdir: workdir, ExportDir: exportDir, CostEstimator: claude.EstimateCostUSD, Logf: t.Logf,
 	})
 	must(t, err)
 	must(t, h.Start(ctx))
@@ -247,6 +254,14 @@ func TestEndToEndChatToPromotionAndExport(t *testing.T) {
 	det, err := h.TaskDetail(ctx, taskID)
 	must(t, err)
 	cands := det["candidates"].([]map[string]any)
+	// The placeholder was never submitted: every candidate tree has the entrypoint.
+	for _, c := range cands {
+		tr, err := h.Tree(ctx, c["candidate_root"].(string))
+		must(t, err)
+		if _, ok := tr["files"].(map[string]string)["src/page_size.py"]; !ok {
+			t.Fatalf("candidate %v lacks the entrypoint", c["proposal_id"])
+		}
+	}
 	for i, c := range cands {
 		t.Logf("candidate %d: %v acceptance=%v", i, c["proposal_id"], c["acceptance"])
 		if ds, ok := c["details"].([]runner.CaseDetail); ok {
@@ -296,7 +311,8 @@ func TestEndToEndChatToPromotionAndExport(t *testing.T) {
 	}
 	// Model calls: intake + planner + one coder call per candidate + one
 	// tester diagnosis per failure (Jev chooses GATHER_CONTEXT each time).
-	if want := 2 + len(cands) + (len(cands) - 1); len(anthropic.Requests()) != want {
+	// (+1 for the re-ask after the placeholder reply.)
+	if want := 2 + 1 + len(cands) + (len(cands) - 1); len(anthropic.Requests()) != want {
 		t.Fatalf("want %d model calls, got %d", want, len(anthropic.Requests()))
 	}
 	// Every request carried the key, adaptive thinking and a strict tool.

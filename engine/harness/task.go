@@ -318,7 +318,7 @@ func (h *Harness) plan(ctx context.Context, r *taskRun, t *coreclient.TaskSummar
 }
 
 func (h *Harness) code(ctx context.Context, r *taskRun, t *coreclient.TaskSummary, plan string, last attemptInfo) (*coreclient.SubmitResult, map[string]string, error) {
-	brief, _, err := h.taskBrief(ctx, t)
+	brief, files, err := h.taskBrief(ctx, t)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -345,19 +345,39 @@ func (h *Harness) code(ctx context.Context, r *taskRun, t *coreclient.TaskSummar
 		}
 		user += "\nFix the candidate so that it satisfies the requirement."
 	}
-	res, err := h.callModel(ctx, r, llm.Call{Role: "coder", System: coderSystem, Messages: []llm.Message{{Role: "user", Text: user}}, Tool: submitCandidateTool, RequireTool: true}, what)
-	if err != nil {
-		return nil, nil, err
-	}
-	var in struct {
+	type candidateInput struct {
 		Files []struct {
 			Path    string `json:"path"`
 			Content string `json:"content"`
 		} `json:"files"`
 		Rationale string `json:"rationale"`
 	}
-	if err := strictDecode(res.ToolInput, &in); err != nil {
-		return nil, nil, fmt.Errorf("coder output: %w", err)
+	call := llm.Call{Role: "coder", System: coderSystem, Messages: []llm.Message{{Role: "user", Text: user}}, Tool: submitCandidateTool, RequireTool: true}
+	var (
+		res llm.Result
+		in  candidateInput
+	)
+	for attempt := 0; ; attempt++ {
+		res, err = h.callModel(ctx, r, call, what)
+		if err != nil {
+			return nil, nil, err
+		}
+		in = candidateInput{}
+		if err := strictDecode(res.ToolInput, &in); err != nil {
+			return nil, nil, fmt.Errorf("coder output: %w", err)
+		}
+		// Cheap runtime sanity check before spending a sandbox run and a
+		// repair: the entrypoint file must exist in the candidate. One
+		// bounded re-ask; a still-bad candidate is submitted as-is and fails
+		// its checks the normal way.
+		missing := entrypointMissing(t, in.Files, files)
+		if missing == "" || attempt >= 1 {
+			break
+		}
+		h.act(r.TaskID, "model", "warn", "Coder output did not contain "+missing+"; asking once more", "", nil)
+		call.Messages = append(call.Messages,
+			llm.Message{Role: "assistant", Text: "(submitted a candidate without " + missing + ")"},
+			llm.Message{Role: "user", Text: "Your submission did not contain " + missing + ", which must define the entrypoint function. Submit the complete implementation with submit_candidate, including that file."})
 	}
 	changed := map[string]string{}
 	for _, f := range in.Files {
@@ -596,4 +616,24 @@ func (h *Harness) CancelTask(ctx context.Context, taskID string) error {
 	h.post("system", "Task "+taskID+" was cancelled by the operator. The approved project is unchanged by it.", taskID, nil)
 	h.bus.Publish("tasks", map[string]any{"changed": taskID})
 	return nil
+}
+
+// entrypointMissing returns the entrypoint path when neither the candidate
+// nor the approved tree contains it.
+func entrypointMissing(t *coreclient.TaskSummary, cand []struct {
+	Path    string `json:"path"`
+	Content string `json:"content"`
+}, approved map[string]string) string {
+	if t.Entrypoint == nil {
+		return ""
+	}
+	for _, f := range cand {
+		if f.Path == t.Entrypoint.Path {
+			return ""
+		}
+	}
+	if _, ok := approved[t.Entrypoint.Path]; ok {
+		return ""
+	}
+	return t.Entrypoint.Path
 }

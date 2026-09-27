@@ -1113,6 +1113,41 @@
     return meter;
   }
 
+  /** OPEN but its work loop is not running (e.g. interrupted by a restart). */
+  const isResumable = (t) => !!t && String(t.status).toUpperCase() === 'OPEN' && t.running === false;
+  const resumeBusy = new Set();
+
+  function resumeButton(taskId, size) {
+    const btn = h('button', { type: 'button', class: 'btn btn-primary ' + (size || 'btn-sm'), disabled: resumeBusy.has(taskId) || state.expired },
+      resumeBusy.has(taskId) ? 'Resuming…' : 'Resume');
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      if (resumeBusy.has(taskId)) return;
+      resumeBusy.add(taskId);
+      btn.disabled = true;
+      btn.textContent = 'Resuming…';
+      try {
+        await api('/api/tasks/' + enc(taskId) + '/resume', { method: 'POST' });
+        toast('Resumed ' + taskId + '.');
+        const row = state.tasks.find((t) => t.task_id === taskId);
+        if (row) row.running = true;
+        if (state.taskDetail && state.taskDetail.task && state.taskDetail.task.task_id === taskId) state.taskDetail.task.running = true;
+      } catch (err) {
+        reportError(err);
+      } finally {
+        resumeBusy.delete(taskId);
+        renderTasks();
+        scheduleTasksRefresh(taskId);
+      }
+    });
+    return btn;
+  }
+
+  function runningBadge(t) {
+    if (!t || String(t.status).toUpperCase() !== 'OPEN' || typeof t.running !== 'boolean') return null;
+    return t.running ? badge('running', 'run', 'plain') : badge('not running', 'warn', 'plain');
+  }
+
   function phaseBadge(phase) {
     if (!phase) return null;
     const p = String(phase);
@@ -1135,14 +1170,16 @@
       return;
     }
     const sorted = [...state.tasks].sort((a, b) => (Number(b.updated_ts) || 0) - (Number(a.updated_ts) || 0));
-    list.append(h('ul', { class: 'task-list', 'aria-label': 'Tasks' }, sorted.map((t) => h('li', null,
-      h('button', { type: 'button', class: 'task-row', onclick: () => openTaskDetail(t.task_id) },
+    list.append(h('ul', { class: 'task-list', 'aria-label': 'Tasks' }, sorted.map((t) => h('li', { class: 'task-item' },
+      h('button', { type: 'button', class: 'task-row' + (isResumable(t) ? ' has-actions' : ''), onclick: () => openTaskDetail(t.task_id) },
         h('div', null, h('div', { class: 't-title' }, String(t.title || t.task_id)), h('div', { class: 't-id' }, String(t.task_id))),
-        h('div', { class: 't-badges' }, badge(t.status || 'UNKNOWN'), phaseBadge(t.phase)),
+        h('div', { class: 't-badges' }, badge(t.status || 'UNKNOWN'), runningBadge(t), phaseBadge(t.phase)),
         h('div', { class: 't-meta' },
           h('span', null, 'Repairs ', h('b', null, (t.repairs_used ?? 0) + '/' + (t.max_repairs ?? '—')), repairsMeter(t.repairs_used, t.max_repairs)),
           h('span', null, 'Candidates ', h('b', null, String(t.candidates ?? 0)), Number(t.failed_candidates) ? ' (' + t.failed_candidates + ' failed)' : ''),
-          h('span', null, 'Updated ', h('b', null, fmtTime(t.updated_ts)))))))));
+          h('span', null, 'Updated ', h('b', null, fmtTime(t.updated_ts))))),
+      isResumable(t) ? h('div', { class: 'task-actions' },
+        h('span', { class: 'muted small' }, 'Interrupted — open, but its work loop is not running.'), resumeButton(t.task_id)) : null))));
   }
 
   async function openTaskDetail(taskId) {
@@ -1193,17 +1230,23 @@
     const d = state.taskDetail;
     const summary = d && d.task ? d.task : state.tasks.find((t) => t.task_id === state.openTask) || { task_id: state.openTask };
     const top = h('div', { class: 'detail-top' }, back, h('span', { class: 'grow' }));
+    if (isResumable(summary) && !state.confirmCancel) top.append(resumeButton(summary.task_id));
     if (String(summary.status).toUpperCase() === 'OPEN') top.append(cancelControls(summary.task_id));
     box.append(top);
     box.append(h('h3', { class: 'detail-title' }, String(summary.title || summary.task_id)));
     box.append(h('div', { class: 'detail-sub' },
       h('span', { class: 'chip' }, String(summary.task_id)),
       summary.status ? badge(summary.status) : null,
+      runningBadge(summary),
       phaseBadge(summary.phase),
       summary.max_repairs !== undefined ? h('span', null, 'Repairs ', h('b', null, (summary.repairs_used ?? 0) + '/' + summary.max_repairs)) : null,
       summary.candidates !== undefined ? h('span', null, 'Candidates ', h('b', null, String(summary.candidates)), Number(summary.failed_candidates) ? ' (' + summary.failed_candidates + ' failed)' : '') : null,
       summary.updated_ts ? h('span', null, 'Updated ', h('b', null, fmtTime(summary.updated_ts))) : null));
 
+    if (isResumable(summary)) {
+      box.append(h('div', { class: 'box resume-note' }, 'This task is open but its work loop is not running — for example after a restart. ',
+        'Resume restarts it; Cancel closes it.'));
+    }
     if (!d) {
       box.append(h('p', { class: 'empty' }, state.taskDetailError ? 'Could not load task: ' + state.taskDetailError : 'Loading task…'));
       return;

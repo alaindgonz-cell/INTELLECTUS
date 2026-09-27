@@ -86,7 +86,9 @@ type Config struct {
 
 	// Per-process rlimits applied with prlimit (defaults: 10 s CPU, 1 GiB
 	// address space, 64 processes, 256 open files, 16 MiB file size; core
-	// dumps are always disabled).
+	// dumps are always disabled). As root, RLIMIT_NPROC is MaxProcs for the
+	// dedicated host uid. Not as root it is RELATIVE: the tasks the engine's
+	// uid owns at launch + MaxProcs (see nprocLimit), a weaker, racy bound.
 	CPUSeconds        int
 	AddressSpaceBytes int64
 	MaxProcs          int

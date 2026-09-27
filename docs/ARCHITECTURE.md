@@ -124,37 +124,82 @@ outcome and postcondition evaluation. External effects are executed by the
 Go gateway; a crash after `DISPATCH_STARTED` becomes `OUTCOME_UNKNOWN` on
 restart and is reconciled by an adapter read, never blindly re-executed.
 
+## The harness (v0.2)
+
+`engine/harness` turns the runtime into an agent harness operated from a
+web UI (`engine/web`, `intellectus serve`):
+
+```
+operator chat ──► intake (Claude) ──► task proposal card
+                                         │ operator approves (Ed25519-signed:
+                                         ▼ requirement, protected manifest + entrypoint,
+                                           spec-consistency assumptions, task)
+  Planner (Claude) ─► Coder (Claude) ─► submit ─► check_plan ─► bubblewrap sandbox
+        ▲                 ▲                                          │ observations
+        │ REPLAN          │ REPAIR / GATHER_CONTEXT (Tester)         ▼
+        └──── route: deterministic rules ─► Jev (SHADOW/LIVE) ◄── core verdict FAIL
+                                                                     │ PASS
+                                  evaluate_context (Rust↔Mojo) ◄─────┘
+                                         │ PASS
+                  scheduler submits promote_local ─► admit ─► MISSING_APPROVAL
+                                         │ operator approves the exact action digest
+                                         ▼
+                           admit ─► dispatch_begin ─► approved root advances ─► report
+```
+
+* Model output enters the core only through `submit` / `record_input`, with
+  the full provider response kept as a protected blob. The runtime, never
+  the model, binds the task id, the base root and every principal.
+* Operator commands are signed only on an explicit UI action. The UI is
+  token-authenticated (an HttpOnly SameSite=Strict cookie), mutations require
+  a custom CSRF header and same-origin, and every page is served under a
+  strict CSP. Model text is rendered with `textContent` only.
+* The sandbox (`engine/sandbox`) runs each case in a fresh interpreter
+  under bubblewrap: every namespace unshared, nested user namespaces
+  disabled, an unprivileged host uid, a read-only root, a bounded tmpfs, a
+  scrubbed environment, no inherited descriptors, and CPU / memory / process /
+  file-size / wall-clock limits. The worker is used only if its 13-probe
+  isolation self-test passes at startup, and only if the operator's policy
+  trusts its implementation digest.
+* Jev is consulted only when the core's `route` leaves a real choice. Its
+  assessment (model, probabilities, confidence, latency, usage, fallback
+  reason) is recorded in the core. In SHADOW mode it is never applied.
+
 ## Incompatibilities and deviations from the contract (explicit)
 
-1. **Authorization vs. request.** The contract's CURRENT AUTHORIZATION
-   section says "specification only". The project owner then explicitly
-   asked for this implementation; that request is treated as the separate
-   authorized task the contract anticipates. No paid model API is called,
-   nothing is deployed, and generated code is never executed.
-2. **Stack.** The contract proposes Python + SQLite. The owner required
-   Rust / Go / Mojo. SQLite is kept (via `rusqlite`, bundled). The
-   contract's "no microservices" guidance is respected: there are two
-   processes on one host joined by a pipe, plus a short-lived deductor
-   subprocess — not a distributed system. The cross-language boundary is
-   a real cost (a wire protocol to keep in sync); it is pinned by
+1. **Authorization.** The contract's CURRENT AUTHORIZATION section says
+   "specification only". The project owner then explicitly asked for an
+   implementation (v0.1) and later for a real harness connected to Claude
+   and Jev (v0.2). Those requests are treated as the separate authorized
+   tasks the contract anticipates. Paid Claude calls happen only when the
+   operator supplies a key and chats. Nothing is deployed.
+2. **Stack.** The contract proposes Python + SQLite; the owner required
+   Rust / Go / Mojo. SQLite is kept. The processes are one core, one engine
+   and a short-lived deductor subprocess on one host, which is not a
+   distributed system. The cross-language boundary is pinned by
    `docs/PROTOCOL.md` and by end-to-end tests.
-3. **Mojo toolchain maturity.** The deductor was built and tested with
-   Mojo 1.1.0; Mojo syntax still changes between releases. Because the Rust
-   reference implements identical semantics and `cross:` mode fails closed
-   on disagreement, a Mojo break cannot silently change a decision.
-4. **Isolation (M4) is not implemented.** The protected runner has only a
-   `FakeWorker` (scripted outcomes; candidate code is not executed) and a
-   `SandboxWorker` that always refuses. Every receipt from the fake worker
-   carries a `SIMULATED` applicability limit, and task reports say so.
-   Contract T19 is therefore not satisfiable yet and is reported as such.
-5. **Snapshots** are stored in full per event — simple and verifiable, but
-   O(n·|state|) storage. Acceptable for the MVP; compaction is an M9 item.
-6. **Jev.** Only a `SimulatedAdvisor` exists. No live Jev/TypeSafe client
-   was written, because the provider API was not verified against primary
-   documentation in this task. Assessments record mode SIMULATED/SHADOW and
-   can never be mistaken for a live result.
+3. **Mojo toolchain maturity.** The deductor was verified with Mojo 1.1.0.
+   `cross:` mode fails closed on any disagreement with the Rust reference.
+4. **Isolation (M4)** is implemented with bubblewrap + prlimit, with no
+   seccomp filter; the residual kernel attack surface is documented in
+   `engine/sandbox/README.md`. When not running as root, the process limit
+   is relative to the user's current process count, which is a weaker bound.
+5. **Snapshots** are stored in full per event: simple and verifiable, but
+   O(n·|state|) storage. Compaction is an M9 item.
+6. **Jev.** The client follows the request shape of the MIT community
+   harness `ismaelsoilet/jev-harness@37ab8c6`, because TypeSafe's own
+   documentation was unreachable from the build environment. The live
+   OpenRouter call was refused by that environment's egress policy, so the
+   live path is unverified; the recorded fallback path is verified. Jev
+   defaults to SHADOW until thresholds are calibrated on held-out examples,
+   as the contract requires.
 7. **Task scope of effects.** A successful `promote_local` completes its
-   task, after which the core accepts no new proposals for it. An external
-   effect on the *promoted* root (e.g. exporting it) therefore needs a new
-   operator-opened task. This is deliberate (a completed task cannot be
-   silently extended) but is a design decision the owner may want to revisit.
+   task. Exports therefore run as separate, operator-opened effect-only
+   tasks, which complete when the export's postconditions pass.
+8. **Task shape.** Chat-created tasks are single Python functions with
+   JSON-encodable inputs and outputs. The formal context of such a task
+   checks only that the approved tests never both accept and reject the
+   same input.
+9. **Comparison study (§7).** It is not run. The harness records the
+   inputs it needs (usage, latency, routing decisions, outcomes), but a
+   B0/B1/B2 study needs live Jev access and a budgeted task suite.

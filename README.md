@@ -11,7 +11,9 @@ the exact change. Every step is recorded in an append-only, replayable log.
 > tracks justification. Trusted code checks and authorizes. The gateway
 > executes. You approve.
 
-![INTELLECTUS UI](docs/screenshots/ui-desktop-light.png)
+![INTELLECTUS during a live session: the approval card on the left, the live activity on the right](docs/screenshots/live-activity.png)
+
+<sub>Screenshots are from a live session: real `claude-opus-5` calls, candidate code executed in the bubblewrap sandbox, and the Rust↔Mojo deductor cross-check. More: [proposal](docs/screenshots/live-proposal.png) · [task detail](docs/screenshots/live-tasks.png) · [report](docs/screenshots/live-report.png) · [dark](docs/screenshots/live-dark.png) · [mobile](docs/screenshots/live-mobile.png).</sub>
 
 | Component | Language | Directory |
 |---|---|---|
@@ -80,11 +82,11 @@ Nothing here has been independently audited.
 |---|---|---|
 | Core: event log, reducer, replay, knowledge graph, admission, outbox, recovery (contract T01–T26 except T19) | VERIFIED | 34 Rust integration tests, 9 unit tests |
 | Mojo deductor ≡ Rust reference | VERIFIED | 32 hand-derived vectors; 300 random differential cases; the core in `cross` mode |
-| Real sandboxed execution (M4, contract T19) | VERIFIED on this host (as root) | 18 sandbox tests, including adversarial candidates (file, env, network, fork bomb, memory, spin, forged results); 13-probe self-test at every start |
-| Claude integration (official Go SDK) | VERIFIED + EXECUTED live | Wire-format tests against a fake API; a live session with `claude-opus-5`: proposal, then plan, then code passing 16/16 sandboxed tests, then promotion |
-| Jev client (TypeSafe and OpenRouter routes) | VERIFIED against a fake API; NOT executed live | Both endpoints are blocked by this build environment's network policy; the request shape comes from the MIT community harness `ismaelsoilet/jev-harness@37ab8c6` because TypeSafe's docs were unreachable |
+| Real sandboxed execution (M4, contract T19) | VERIFIED on this host, running both as root and as an unprivileged user | Sandbox tests include adversarial candidates (file, env, network, fork bomb, memory, spin, forged results); a 13-probe isolation self-test runs at every start |
+| Claude integration (official Go SDK) | VERIFIED + EXECUTED live | Wire-format tests against a fake API. Live sessions with `claude-opus-5` completed three tasks (slugify 16/16, Roman numerals 18/18, durations 20/20 tests in the sandbox), including one real repair round, for about $0.30 in total (estimated) |
+| Jev client (TypeSafe and OpenRouter routes) | VERIFIED against a fake API; live call NOT completed | In the live session the OpenRouter call was refused by this environment's egress policy. The harness recorded the fallback and applied the deterministic route. The request shape comes from the MIT community harness `ismaelsoilet/jev-harness@37ab8c6` because TypeSafe's docs were unreachable |
 | Harness end to end | VERIFIED | A real core, real sandbox and fake Claude/Jev servers run chat → proposal → approval → failing candidate → Jev LIVE routing → diagnosis → repair → PASS → approval → promotion → export → replay |
-| Web UI and HTTP API | VERIFIED (auth/CSRF/CSP) + EXECUTED | Server security tests; Playwright run against fixtures; screenshots in `docs/screenshots/` |
+| Web UI and HTTP API | VERIFIED (auth/CSRF/CSP) + EXECUTED live | Server security tests. A Playwright suite (86 checks, including XSS, CSP, reconnect and layout) runs against a fixture server; a Playwright-driven live session produced the screenshots |
 | Comparison study B0/B1/B2 (contract §7) | NOT DONE | Needs live Jev access and a task suite with a budget |
 
 ### Limitations

@@ -206,3 +206,36 @@ func TestComputeDigestCoversInputs(t *testing.T) {
 		}
 	}
 }
+
+func TestSetupRefusedForNproc(t *testing.T) {
+	mk := func(code int, stderr string, result string) caseRun {
+		r := caseRun{exitCode: code, result: []byte(result)}
+		r.stderr.limit = 8192
+		r.stderr.Write([]byte(stderr))
+		return r
+	}
+	yes := []caseRun{
+		mk(1, "bwrap: Creating new namespace failed: Resource temporarily unavailable\n", ""),
+		mk(1, "bwrap: Can't fork for pid 1: Resource temporarily unavailable\n", ""),
+	}
+	for _, r := range yes {
+		if !setupRefusedForNproc(r) {
+			t.Errorf("not retried: %q", r.stderr.buf)
+		}
+	}
+	timedOut := mk(1, "bwrap: Creating new namespace failed: Resource temporarily unavailable\n", "")
+	timedOut.timedOut = true
+	no := []caseRun{
+		mk(1, "bwrap: Can't find source path /x: No such file or directory\n", ""),
+		mk(1, "Traceback ...\nBlockingIOError: Resource temporarily unavailable\n", ""),
+		mk(1, "bwrap: Creating new namespace failed: Resource temporarily unavailable\n", "{\"returns\":1}\n"),
+		mk(0, "bwrap: Creating new namespace failed: Resource temporarily unavailable\n", ""),
+		mk(1, "bwrap: x Resource temporarily unavailable\nmore output\n", ""),
+		timedOut,
+	}
+	for _, r := range no {
+		if setupRefusedForNproc(r) {
+			t.Errorf("retried: %q", r.stderr.buf)
+		}
+	}
+}
