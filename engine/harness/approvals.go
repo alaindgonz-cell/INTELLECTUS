@@ -50,6 +50,9 @@ func (h *Harness) refreshApprovalCard(a *approval) {
 // proposeAction submits a runtime-built action and returns the pending
 // approval (MISSING_APPROVAL is the expected first admission result).
 func (h *Harness) proposeAction(ctx context.Context, taskID, tool string, args map[string]any, post []string, key string) (coreclient.ID, *coreclient.AdmitResult, error) {
+	if post == nil {
+		post = []string{} // the core's strict schema refuses null lists
+	}
 	env, _ := json.Marshal(map[string]any{
 		"kind": "action", "task_id": taskID, "tool_id": tool, "arguments": args,
 		"premise_refs": []string{}, "idempotency_key": key, "expected_postconditions": post,

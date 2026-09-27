@@ -326,7 +326,8 @@
       box.appendChild(h('div', { class: 'notice', title: 'Reported by: ' + sources.join(', ') },
         h('span', { class: 'notice-icon', 'aria-hidden': 'true' }),
         h('span', { class: 'notice-text' }, text),
-        h('button', { type: 'button', class: 'btn btn-ghost btn-sm', 'aria-label': 'Dismiss notice', onclick: () => { state.dismissed.add(text); renderNotices(); } }, 'Dismiss')));
+        h('button', { type: 'button', class: 'btn btn-ghost btn-sm notice-dismiss', 'aria-label': 'Dismiss notice', onclick: () => { state.dismissed.add(text); renderNotices(); } },
+          h('span', { class: 'dismiss-label' }, 'Dismiss'), h('span', { class: 'dismiss-x', 'aria-hidden': 'true' }, '×'))));
     }
   }
 
@@ -368,20 +369,22 @@
     const s = state.status;
     if (!s) return;
     const core = s.core || {};
+    // .sec parts are secondary and hidden on narrow screens.
+    const sec = (text) => (text ? h('span', { class: 'sec' }, text) : null);
     setPill('pill-core', s.busy ? 'run' : 'ok',
-      [h('b', null, '#' + fmtInt(s.head_sequence)), ' · ', core.deductor || '—'],
+      [h('b', null, '#' + fmtInt(s.head_sequence)), sec(' · ' + (core.deductor || '—'))],
       'Core head sequence ' + s.head_sequence + (s.busy ? ' — working' : ''));
     const cl = s.claude || {};
     setPill('pill-claude', cl.configured ? 'ok' : 'warn', [cl.configured ? mainModel(cl.models) || 'configured' : 'not configured']);
     const jev = s.jev || {};
     const mode = String(jev.policy_mode || 'OFF').toUpperCase();
     const jevTone = mode === 'OFF' ? 'neutral' : !jev.configured ? 'warn' : mode === 'LIVE' ? 'ok' : 'info';
-    setPill('pill-jev', jevTone, [h('b', null, mode), jev.configured ? (jev.model ? ' · ' + jev.model : '') : ' · not configured']);
+    setPill('pill-jev', jevTone, [h('b', null, mode), jev.configured ? sec(jev.model ? ' · ' + jev.model : '') : ' · not configured']);
     const sb = sandboxState(s.sandbox);
-    setPill('pill-sandbox', sb.tone, [sb.label, s.sandbox && s.sandbox.kind ? ' · ' + s.sandbox.kind : '']);
+    setPill('pill-sandbox', sb.tone, [sb.label, sec(s.sandbox && s.sandbox.kind ? ' · ' + s.sandbox.kind : '')]);
     const u = s.usage || {};
     const tokens = (Number(u.input_tokens) || 0) + (Number(u.output_tokens) || 0);
-    setPill('pill-usage', 'info', [fmtInt(u.model_calls ?? 0) + ' calls · ' + fmtTokens(tokens) + ' tok · ≈' + fmtUsd(u.estimated_cost_usd ?? 0, 2) + ' est.'],
+    setPill('pill-usage', 'info', [sec(fmtInt(u.model_calls ?? 0) + ' calls · ' + fmtTokens(tokens) + ' tok · '), '≈' + fmtUsd(u.estimated_cost_usd ?? 0, 2) + ' est.'],
       'Estimated cost — computed from token counts, not a bill');
     syncJevControls();
     if (s.approved_root) addKnownRoot(s.approved_root, 'approved root');
@@ -1402,6 +1405,7 @@
     state.files.mode = mode;
     for (const b of document.querySelectorAll('[data-files-mode]')) b.setAttribute('aria-pressed', String(b.dataset.filesMode === mode));
     $('root-field').hidden = mode !== 'tree';
+    $('export-btn').hidden = mode !== 'tree';
     $('diff-selects').hidden = mode !== 'diff';
     if (mode === 'diff') {
       if (!state.files.from || !state.files.to) {
@@ -2013,7 +2017,12 @@
     for (const b of document.querySelectorAll('#mobile-tabs [role="tab"]')) b.addEventListener('click', () => setMobileView(b.dataset.mview));
     tablistKeys($('work-tabs'), '[role="tab"]');
     tablistKeys($('mobile-tabs'), '[role="tab"]');
+    const syncPlaceholder = () => {
+      if (!state.expired) ta.placeholder = mobileQuery.matches ? 'Message INTELLECTUS…' : 'Describe a change, or ask about the project…';
+    };
+    syncPlaceholder();
     mobileQuery.addEventListener('change', () => {
+      syncPlaceholder();
       if (!mobileQuery.matches) setWorkTab(state.workTab);
     });
 

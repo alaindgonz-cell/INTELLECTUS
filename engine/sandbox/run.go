@@ -212,7 +212,7 @@ func (w *Worker) classify(run caseRun, exp expectation, timeout time.Duration) (
 	case run.startErr != nil:
 		return statusError, errorJSON("sandbox failed to start: " + run.startErr.Error())
 	case run.timedOut:
-		return statusTimeout, errorJSON(fmt.Sprintf("wall-clock timeout after %s: process group killed", timeout))
+		return statusTimeout, errorJSON(fmt.Sprintf("wall-clock timeout after %s: sandbox killed", timeout))
 	case run.signaled:
 		return statusError, errorJSON(fmt.Sprintf("sandbox monitor killed by signal %v", run.signal))
 	}
@@ -270,7 +270,7 @@ func singleLine(data []byte) ([]byte, error) {
 func describeExit(code int) string {
 	if code > 128 && code < 128+65 {
 		sig := syscall.Signal(code - 128)
-		return fmt.Sprintf("interpreter exit status %d (killed by signal %d, %v, or exited with that status)", code, code-128, sig)
+		return fmt.Sprintf("interpreter exit status %d: killed by signal %d (%v), or exited with that status", code, code-128, sig)
 	}
 	if code == 1 {
 		return "interpreter or sandbox setup exited with status 1"

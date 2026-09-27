@@ -324,7 +324,7 @@ func (w *Worker) describe() ([]byte, error) {
 			"pdeathsig":             "SIGKILL",
 			"env":                   []string{},
 			"inherited_fds":         []int{0, 1, 2, 3},
-			"kill_on_timeout":       "SIGKILL to process group",
+			"kill_on_timeout":       "SIGKILL to sandbox init (then monitor process group)",
 			"cpu_limit_status":      "TIMEOUT",
 			"exit_status_by_signal": "ERROR",
 		},

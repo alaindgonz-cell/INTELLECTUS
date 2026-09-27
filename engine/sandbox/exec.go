@@ -129,8 +129,10 @@ func (w *Worker) runCase(ctx context.Context, spec caseSpec) caseRun {
 		if cmd.Process == nil {
 			return nil
 		}
-		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		return killSandbox(cmd.Process.Pid)
 	}
+	// If the monitor has not exited WaitDelay after Cancel, os/exec kills
+	// it; --die-with-parent then takes the sandbox down with it.
 	cmd.WaitDelay = waitDelay
 
 	// Pdeathsig is tied to the forking OS thread: keep it alive until Wait.
@@ -200,6 +202,45 @@ func (w *Worker) runCase(ctx context.Context, spec caseSpec) caseRun {
 		r.startErr = waitErr
 	}
 	return r
+}
+
+// killSandbox kills a running sandbox whose launcher (prlimit, exec'd into
+// the bwrap monitor) has host pid pid. The monitor's only child is the
+// sandbox's pid-namespace init (it runs in its own session, see
+// --new-session). Killing that init first makes the kernel kill every
+// process in the namespace and wait for them before the init is reaped by
+// the monitor, which then exits: when Wait returns, nothing of the sandbox
+// is left. Killing the monitor first would orphan the init and leave the
+// teardown to the host's pid 1. With no child yet (still in bwrap setup)
+// the monitor's process group is killed instead.
+func killSandbox(pid int) error {
+	kids := childrenOf(pid)
+	for _, k := range kids {
+		_ = syscall.Kill(k, syscall.SIGKILL)
+	}
+	if len(kids) == 0 {
+		return syscall.Kill(-pid, syscall.SIGKILL)
+	}
+	return nil
+}
+
+// childrenOf lists the host pids whose parent is pid.
+func childrenOf(pid int) []int {
+	var out []int
+	if b, err := os.ReadFile(fmt.Sprintf("/proc/%d/task/%d/children", pid, pid)); err == nil {
+		for _, f := range strings.Fields(string(b)) {
+			if c, err := strconv.Atoi(f); err == nil {
+				out = append(out, c)
+			}
+		}
+		return out
+	}
+	for c, ppid := range processTable() {
+		if ppid == pid {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 // readCapped reads until EOF, keeping at most limit bytes and draining the
