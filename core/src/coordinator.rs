@@ -26,7 +26,16 @@ pub const PROMOTE_TOOL: &str = "promote_local";
 pub const PROTOCOL_VERSION: u64 = 1;
 pub const ROUTE_OPTIONS: [&str; 5] = ["GATHER_CONTEXT", "REPAIR", "REPLAN", "ESCALATE", "STOP"];
 const MODE_ROLES: [&str; 3] = ["planner", "coder", "tester"];
-const ROLES: [&str; 6] = ["planner", "coder", "tester", "runner", "gateway", "advisor"];
+const ROLES: [&str; 8] = [
+    "planner",
+    "coder",
+    "tester",
+    "runner",
+    "gateway",
+    "advisor",
+    "intake",
+    "scheduler",
+];
 const MAX_SUMMARY: usize = 2000;
 
 pub type Clock = Box<dyn Fn() -> u64 + Send>;
@@ -294,6 +303,10 @@ impl Coordinator {
                 | "replay_verify"
                 | "pending_reconciliation"
                 | "query"
+                | "list_tasks"
+                | "read_tree"
+                | "events_since"
+                | "status"
         );
         let effect_recording = matches!(
             cmd,
@@ -326,6 +339,11 @@ impl Coordinator {
             "task_transition" => self.task_transition(args(a)?),
             "task_report" => self.task_report(args(a)?),
             "replay_verify" => self.replay_verify(),
+            "record_input" => self.record_input(args(a)?),
+            "list_tasks" => self.list_tasks(),
+            "read_tree" => self.read_tree(args(a)?),
+            "events_since" => self.events_since(args(a)?),
+            "status" => self.status(),
             other => Err(CoreError::new("UNKNOWN_COMMAND", other.to_string())),
         }
     }
@@ -355,6 +373,7 @@ impl Coordinator {
             "project_id": self.state.project_id,
             "head_sequence": self.state.sequence,
             "reducer_version": REDUCER_VERSION,
+            "schema_version": SCHEMA_VERSION,
             "deductor": {"kind": self.deductor.kind(), "implementation_digest": self.deductor.implementation_digest()?},
         }))
     }
@@ -478,9 +497,12 @@ impl Coordinator {
         if MODE_ROLES.contains(&sess.role.as_str()) {
             out["approved_root"] =
                 json!({"digest": s.approved_root, "files": self.materialize(&s.approved_root)?});
-            if let Some(m) = s.test_manifests.get(&task.test_manifest) {
-                out["test_manifest"] =
-                    json!({"id": m.manifest_id, "digest": m.digest, "cases": m.cases});
+            if let Some(m) = task
+                .test_manifest
+                .as_ref()
+                .and_then(|id| s.test_manifests.get(id))
+            {
+                out["test_manifest"] = json!({"id": m.manifest_id, "digest": m.digest, "cases": m.cases, "entrypoint": m.entrypoint});
             }
         }
         Ok(out)
@@ -514,25 +536,75 @@ impl Coordinator {
     // Proposals
     // ------------------------------------------------------------------
 
+    /// Record untrusted input (and its provider provenance) in `tx`.
+    fn record_untrusted(
+        tx: &mut Tx,
+        sess: &Session,
+        raw: &str,
+        provider: Option<&ProviderArgs>,
+        kind: &str,
+    ) -> Result<String> {
+        let input_id = format!("input:{}", tx.next_seq());
+        let blob = tx.put_blob(raw.as_bytes().to_vec());
+        let provider = match provider {
+            None => None,
+            Some(p) => {
+                canonical_json(&p.usage)?;
+                let response_blob = p
+                    .raw_response
+                    .as_ref()
+                    .map(|r| tx.put_blob(r.clone().into_bytes()));
+                Some(ProviderRecord {
+                    provider: p.provider.clone(),
+                    model_requested: p.model_requested.clone(),
+                    model_returned: p.model_returned.clone(),
+                    response_id: p.response_id.clone(),
+                    response_blob,
+                    usage: p.usage.clone(),
+                    latency_ms: p.latency_ms,
+                    attempts: p.attempts,
+                })
+            }
+        };
+        tx.emit(
+            &sess.principal,
+            EventBody::InputRecorded {
+                input: InputRecord {
+                    input_id: input_id.clone(),
+                    session_id: sess.session_id.clone(),
+                    principal: sess.principal.clone(),
+                    blob,
+                    byte_len: raw.len() as u64,
+                    rejected: None,
+                    provider,
+                    kind: kind.to_string(),
+                },
+            },
+        )?;
+        Ok(input_id)
+    }
+
+    /// Record model output that is not a proposal (e.g. a chat reply).
+    fn record_input(&mut self, a: RecordInputArgs) -> Result<Value> {
+        let sess = self.session(&a.session_id, &["intake", "planner", "coder", "tester"])?;
+        let mut tx = self.begin();
+        let input_id =
+            Self::record_untrusted(&mut tx, &sess, &a.raw, a.provider_record.as_ref(), "record")?;
+        self.commit(tx)?;
+        Ok(json!({"status": "RECORDED", "input_id": input_id}))
+    }
+
     fn submit(&mut self, a: SubmitArgs) -> Result<Value> {
-        let sess = self.session(&a.session_id, &MODE_ROLES)?;
+        let sess = self.session(&a.session_id, &["planner", "coder", "tester", "scheduler"])?;
         // Record the untrusted input before interpreting it.
         let record = |c: &Coordinator| -> Result<(Tx, String)> {
             let mut tx = c.begin();
-            let input_id = format!("input:{}", tx.next_seq());
-            let blob = tx.put_blob(a.raw.clone().into_bytes());
-            tx.emit(
-                &sess.principal,
-                EventBody::InputRecorded {
-                    input: InputRecord {
-                        input_id: input_id.clone(),
-                        session_id: sess.session_id.clone(),
-                        principal: sess.principal.clone(),
-                        blob,
-                        byte_len: a.raw.len() as u64,
-                        rejected: None,
-                    },
-                },
+            let input_id = Self::record_untrusted(
+                &mut tx,
+                &sess,
+                &a.raw,
+                a.provider_record.as_ref(),
+                "proposal",
             )?;
             Ok((tx, input_id))
         };
@@ -583,7 +655,9 @@ impl Coordinator {
             Envelope::Plan(_) => &["planner"],
             Envelope::Candidate(_) => &["coder"],
             Envelope::Claim(_) => &["planner", "coder", "tester"],
-            Envelope::Action(_) => &["planner", "coder"],
+            // The scheduler proposes deterministic, runtime-built actions
+            // (e.g. promoting a candidate that passed its checks).
+            Envelope::Action(_) => &["planner", "coder", "scheduler"],
         };
         if !allowed.contains(&sess.role.as_str()) {
             return Err(one("ROLE_NOT_PERMITTED"));
@@ -832,15 +906,21 @@ impl Coordinator {
             .get(&p.task_id)
             .ok_or_else(|| CoreError::internal("task missing"))?;
         let policy = s.policy()?;
-        let manifest = s
-            .test_manifests
-            .get(&task.test_manifest)
-            .ok_or_else(|| CoreError::new("UNKNOWN_TEST_MANIFEST", task.test_manifest.clone()))?
+        let manifest = task
+            .test_manifest
+            .as_ref()
+            .and_then(|id| s.test_manifests.get(id))
+            .ok_or_else(|| {
+                CoreError::new("UNKNOWN_TEST_MANIFEST", format!("{:?}", task.test_manifest))
+            })?
             .clone();
-        let env = s
-            .environments
-            .get(&task.environment)
-            .ok_or_else(|| CoreError::new("UNKNOWN_ENVIRONMENT", task.environment.clone()))?
+        let env = task
+            .environment
+            .as_ref()
+            .and_then(|id| s.environments.get(id))
+            .ok_or_else(|| {
+                CoreError::new("UNKNOWN_ENVIRONMENT", format!("{:?}", task.environment))
+            })?
             .clone();
         let kinds: Vec<String> = policy
             .tools
@@ -898,7 +978,7 @@ impl Coordinator {
             };
             checks.push(json!({
                 "check_id": check.check_id, "check_kind": check.check_kind, "subject": check.subject,
-                "test_manifest": {"id": manifest.manifest_id, "digest": manifest.digest, "cases": manifest.cases},
+                "test_manifest": {"id": manifest.manifest_id, "digest": manifest.digest, "cases": manifest.cases, "entrypoint": manifest.entrypoint},
                 "environment": {"id": env.environment_id, "digest": env.digest, "worker_kind": env.worker_kind},
                 "validation_snapshot": check.validation_snapshot, "dependency_fingerprint": check.dependency_fingerprint,
                 "policy_version": policy.version,
@@ -1443,14 +1523,24 @@ impl Coordinator {
         fp: &str,
     ) -> std::result::Result<String, Reason> {
         let policy = s.policy().map_err(|_| Reason::new("INTERNAL"))?;
-        let manifest = s
-            .test_manifests
-            .get(&task.test_manifest)
+        // A task without a protected manifest/environment can never satisfy
+        // acceptance_tests: None never equals a receipt's Some(..).
+        let manifest = task
+            .test_manifest
+            .as_ref()
+            .and_then(|id| s.test_manifests.get(id))
             .map(|m| m.digest.clone());
-        let env = s
-            .environments
-            .get(&task.environment)
+        let env = task
+            .environment
+            .as_ref()
+            .and_then(|id| s.environments.get(id))
             .map(|e| e.digest.clone());
+        if manifest.is_none() || env.is_none() {
+            return Err(Reason::new("MISSING_TEST_MANIFEST")
+                .check("acceptance_tests")
+                .subject(root)
+                .next(&["ESCALATE"]));
+        }
         let for_root: Vec<&Verification> = s
             .verifications
             .values()
@@ -2305,13 +2395,32 @@ impl Coordinator {
                     },
                 )
             }
-            OperatorOp::RegisterTestManifest { manifest_id, cases } => {
+            OperatorOp::RegisterTestManifest {
+                manifest_id,
+                cases,
+                entrypoint,
+            } => {
                 let names: BTreeSet<&str> = cases.iter().map(|c| c.name.as_str()).collect();
                 if !valid_ident(&manifest_id) || names.len() != cases.len() || cases.is_empty() {
                     return Err(vec![Reason::new("SCHEMA_INVALID").subject("test manifest")]);
                 }
-                let d = digest("test_manifest", &json!({"id": manifest_id, "cases": cases}))
-                    .map_err(internal)?;
+                if let Some(e) = &entrypoint {
+                    let ident = !e.function.is_empty()
+                        && e.function.len() <= 128
+                        && !e.function.starts_with(|c: char| c.is_ascii_digit())
+                        && e.function
+                            .chars()
+                            .all(|c| c.is_ascii_alphanumeric() || c == '_');
+                    if e.language != "python" || !ident || !e.path.ends_with(".py") {
+                        return Err(vec![Reason::new("SCHEMA_INVALID").subject("entrypoint")]);
+                    }
+                    validate_path(&e.path).map_err(|r| vec![r])?;
+                }
+                let d = digest(
+                    "test_manifest",
+                    &json!({"id": manifest_id, "cases": cases, "entrypoint": entrypoint}),
+                )
+                .map_err(internal)?;
                 tx.emit(
                     actor,
                     EventBody::TestManifestRegistered {
@@ -2319,6 +2428,7 @@ impl Coordinator {
                             manifest_id,
                             digest: d.clone(),
                             cases,
+                            entrypoint,
                         },
                     },
                 )
@@ -2350,6 +2460,7 @@ impl Coordinator {
             }
             OperatorOp::OpenTask {
                 task_id,
+                title,
                 requirement_refs,
                 test_manifest,
                 environment,
@@ -2362,18 +2473,21 @@ impl Coordinator {
                 for r in &requirement_refs {
                     need(tx, r, |b| matches!(b, NodeBody::Requirement { .. }))?;
                 }
-                if !tx.state.test_manifests.contains_key(&test_manifest) {
-                    return Err(vec![
-                        Reason::new("UNKNOWN_REFERENCE").missing(&test_manifest)
-                    ]);
+                if let Some(m) = &test_manifest {
+                    if !tx.state.test_manifests.contains_key(m) {
+                        return Err(vec![Reason::new("UNKNOWN_REFERENCE").missing(m)]);
+                    }
                 }
-                if !tx.state.environments.contains_key(&environment) {
-                    return Err(vec![Reason::new("UNKNOWN_REFERENCE").missing(&environment)]);
+                if let Some(e) = &environment {
+                    if !tx.state.environments.contains_key(e) {
+                        return Err(vec![Reason::new("UNKNOWN_REFERENCE").missing(e)]);
+                    }
                 }
                 let max =
                     max_repairs.unwrap_or(tx.state.policy.as_ref().map_or(2, |p| p.max_repairs));
                 let task = Task {
                     task_id: task_id.clone(),
+                    title,
                     requirement_refs,
                     test_manifest,
                     environment,
@@ -2554,6 +2668,91 @@ impl Coordinator {
         }))
     }
 
+    fn list_tasks(&self) -> Result<Value> {
+        let s = &self.state;
+        let tasks: Vec<Value> = s
+            .tasks
+            .values()
+            .map(|t| {
+                let requirement = t
+                    .requirement_refs
+                    .first()
+                    .and_then(|r| s.nodes.get(r))
+                    .and_then(|n| match &n.body {
+                        NodeBody::Requirement { text } => Some(text.clone()),
+                        _ => None,
+                    });
+                let manifest = t.test_manifest.as_ref().and_then(|m| s.test_manifests.get(m));
+                let candidates: Vec<Value> = t
+                    .candidates
+                    .iter()
+                    .filter_map(|pid| s.proposals.get(pid))
+                    .map(|p| {
+                        let root = match &p.body {
+                            ProposalBody::Candidate { candidate_root, .. } => candidate_root.clone(),
+                            _ => String::new(),
+                        };
+                        json!({"proposal_id": p.proposal_id, "candidate_root": root, "acceptance": p.acceptance})
+                    })
+                    .collect();
+                json!({
+                    "task_id": t.task_id, "title": t.title, "status": t.status,
+                    "requirement_refs": t.requirement_refs, "requirement": requirement,
+                    "test_manifest": t.test_manifest, "environment": t.environment,
+                    "entrypoint": manifest.and_then(|m| m.entrypoint.clone()),
+                    "cases": manifest.map(|m| m.cases.clone()),
+                    "contexts": t.contexts, "max_repairs": t.max_repairs,
+                    "repairs_used": t.repairs_used, "failed_candidates": t.failed_candidates,
+                    "candidates": candidates, "completed_by": t.completed_by,
+                })
+            })
+            .collect();
+        Ok(json!({"tasks": tasks, "snapshot_sequence": s.sequence}))
+    }
+
+    fn read_tree(&self, a: ReadTreeArgs) -> Result<Value> {
+        let root = a.root.unwrap_or_else(|| self.state.approved_root.clone());
+        Ok(json!({"root": root, "files": self.materialize(&root)?}))
+    }
+
+    fn events_since(&self, a: EventsSinceArgs) -> Result<Value> {
+        let limit = a.limit.unwrap_or(100).clamp(1, 500);
+        let events: Vec<Value> = self
+            .store
+            .events_after(a.after, limit)?
+            .iter()
+            .map(|e| {
+                json!({
+                    "sequence": e.sequence, "type": e.event_type, "actor": e.authenticated_actor,
+                    "recorded_at": e.recorded_at, "summary": summarize(&e.body),
+                })
+            })
+            .collect();
+        Ok(json!({"events": events, "head_sequence": self.state.sequence}))
+    }
+
+    fn status(&self) -> Result<Value> {
+        let s = &self.state;
+        let policy = s.policy()?;
+        Ok(json!({
+            "project_id": s.project_id,
+            "head_sequence": s.sequence,
+            "state_digest": self.digest,
+            "approved_root": s.approved_root,
+            "root_history": s.root_history,
+            "reducer_version": REDUCER_VERSION,
+            "schema_version": SCHEMA_VERSION,
+            "policy_version": policy.version,
+            "policy_digest": s.policy_digest,
+            "policy": policy,
+            "deductor": {"kind": self.deductor.kind(), "implementation_digest": self.deductor.implementation_digest().unwrap_or_else(|e| format!("unavailable: {}", e.code))},
+            "shutdown": s.shutdown,
+            "tasks": s.tasks.len(),
+            "environments": s.environments.values().map(|e| json!({"id": e.environment_id, "digest": e.digest, "worker_kind": e.worker_kind, "description": e.description})).collect::<Vec<_>>(),
+            "test_manifests": s.test_manifests.keys().collect::<Vec<_>>(),
+        }))
+    }
+
     pub fn replay_verify(&self) -> Result<Value> {
         let (n, d) = replay_store(&self.store)?;
         Ok(json!({"events": n, "state_digest": d, "matches": d == self.digest}))
@@ -2587,6 +2786,156 @@ pub fn replay_store(store: &Store) -> Result<(u64, String)> {
         }
     }
     Ok((events.len() as u64, d))
+}
+
+/// One-line, non-sensitive description of an event for the UI event log.
+fn summarize(body: &EventBody) -> String {
+    match body {
+        EventBody::Genesis { approved_root, .. } => {
+            format!("project created, approved root {}", short(approved_root))
+        }
+        EventBody::OperatorCommandAccepted { op, .. } => format!("operator command accepted: {op}"),
+        EventBody::PolicySet { policy, .. } => format!("policy set to {}", policy.version),
+        EventBody::TreeRegistered { root, manifest } => {
+            format!("tree {} registered ({} files)", short(root), manifest.len())
+        }
+        EventBody::SessionOpened { session } => format!(
+            "session {} opened for {}",
+            session.session_id, session.principal
+        ),
+        EventBody::InputRecorded { input } => format!(
+            "untrusted input {} recorded from {} ({} bytes{})",
+            input.input_id,
+            input.principal,
+            input.byte_len,
+            input
+                .provider
+                .as_ref()
+                .map(|p| format!(", {}", p.model_returned))
+                .unwrap_or_default()
+        ),
+        EventBody::InputRejected { input_id, reasons } => {
+            format!("input {input_id} rejected: {}", codes(reasons))
+        }
+        EventBody::ProposalRecorded { proposal } => format!(
+            "{} proposal {} recorded for {}",
+            proposal.body.kind(),
+            proposal.proposal_id,
+            proposal.task_id
+        ),
+        EventBody::NodeAdded { node } => format!("knowledge record {} added", node.node_ref),
+        EventBody::Revoked {
+            target,
+            stale_derivations,
+            ..
+        } => format!(
+            "{target} revoked ({} derivations made stale)",
+            stale_derivations.len()
+        ),
+        EventBody::TestManifestRegistered { manifest } => format!(
+            "acceptance manifest {} registered ({} cases)",
+            manifest.manifest_id,
+            manifest.cases.len()
+        ),
+        EventBody::EnvironmentRegistered { environment } => format!(
+            "environment {} registered ({})",
+            environment.environment_id, environment.worker_kind
+        ),
+        EventBody::TaskOpened { task } => format!("task {} opened", task.task_id),
+        EventBody::TaskTransition { task_id, to, .. } => format!("task {task_id} -> {to:?}"),
+        EventBody::CheckRequested { check } => {
+            format!("{} check {} requested", check.check_kind, check.check_id)
+        }
+        EventBody::CheckReportRejected { check_id, reasons } => {
+            format!("report for {check_id} rejected: {}", codes(reasons))
+        }
+        EventBody::VerificationIssued { verification: v } => format!(
+            "{} {} -> {:?} (issuer {})",
+            v.check_kind, v.verification_id, v.result, v.issuer
+        ),
+        EventBody::ContextEvaluated { evaluation, .. } => format!(
+            "formal context {} evaluated: {}",
+            evaluation.context_id,
+            if evaluation.consistent {
+                "consistent"
+            } else {
+                "NOT consistent"
+            }
+        ),
+        EventBody::ApprovalGranted { approval } => format!(
+            "approval {} granted for {} {}",
+            approval.approval_id,
+            approval.tool_id,
+            short(&approval.action_digest)
+        ),
+        EventBody::AdmissionRejected {
+            proposal_id,
+            reasons,
+            ..
+        } => format!("admission of {proposal_id} rejected: {}", codes(reasons)),
+        EventBody::ApplicabilityRecorded { record } => format!(
+            "{} applicable at snapshot {}",
+            record.verification_id, record.current_snapshot
+        ),
+        EventBody::IntentAuthorized { action } => format!(
+            "action {} ({}) authorized",
+            action.action_id, action.tool_id
+        ),
+        EventBody::DispatchStarted {
+            action_id,
+            attempt_id,
+        } => format!("dispatch {attempt_id} of {action_id} started"),
+        EventBody::DispatchStopped {
+            action_id,
+            state,
+            reasons,
+        } => format!("{action_id} stopped as {state:?}: {}", codes(reasons)),
+        EventBody::ApprovedRootAdvanced { from, to, .. } => {
+            format!("approved root {} -> {}", short(from), short(to))
+        }
+        EventBody::OutcomeObserved {
+            action_id, outcome, ..
+        } => format!(
+            "{action_id} outcome {} (via {})",
+            outcome.outcome, outcome.via
+        ),
+        EventBody::OutcomeUnknown { action_id, .. } => {
+            format!("{action_id} outcome UNKNOWN (needs reconciliation)")
+        }
+        EventBody::PostconditionsEvaluated {
+            action_id, result, ..
+        } => format!("{action_id} postconditions {result:?}"),
+        EventBody::ReconciliationRecorded {
+            action_id,
+            new_state,
+            ..
+        } => format!("{action_id} reconciled -> {new_state:?}"),
+        EventBody::AssessmentRecorded { assessment: a } => format!(
+            "routing assessment {}: advisor chose {:?}, applied {}{}",
+            a.assessment_id,
+            a.choice,
+            a.applied_choice,
+            a.fallback_reason
+                .as_ref()
+                .map(|f| format!(" (fallback: {f})"))
+                .unwrap_or_default()
+        ),
+        EventBody::ShutdownRequested {} => "operator shutdown".into(),
+    }
+}
+
+fn short(d: &str) -> String {
+    d.strip_prefix("sha256:")
+        .map(|h| format!("sha256:{}", &h[..h.len().min(12)]))
+        .unwrap_or_else(|| d.to_string())
+}
+
+fn codes(reasons: &[Reason]) -> String {
+    reasons
+        .iter()
+        .map(|r| r.code.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 pub fn action_digest(
@@ -2682,6 +3031,53 @@ struct QueryArgs {
 struct SubmitArgs {
     session_id: String,
     raw: String,
+    #[serde(default)]
+    provider_record: Option<ProviderArgs>,
+}
+
+/// Provenance of a model response, supplied by the (trusted) provider adapter.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProviderArgs {
+    provider: String,
+    model_requested: String,
+    model_returned: String,
+    #[serde(default)]
+    response_id: String,
+    /// Full provider response JSON; stored as a protected blob.
+    #[serde(default)]
+    raw_response: Option<String>,
+    #[serde(default)]
+    usage: Value,
+    #[serde(default)]
+    latency_ms: u64,
+    #[serde(default)]
+    attempts: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecordInputArgs {
+    session_id: String,
+    raw: String,
+    #[serde(default)]
+    provider_record: Option<ProviderArgs>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReadTreeArgs {
+    #[serde(default)]
+    root: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EventsSinceArgs {
+    #[serde(default)]
+    after: u64,
+    #[serde(default)]
+    limit: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -2935,6 +3331,8 @@ enum OperatorOp {
     RegisterTestManifest {
         manifest_id: String,
         cases: Vec<TestCase>,
+        #[serde(default)]
+        entrypoint: Option<Entrypoint>,
     },
     RegisterEnvironment {
         environment_id: String,
@@ -2944,9 +3342,13 @@ enum OperatorOp {
     },
     OpenTask {
         task_id: String,
+        #[serde(default)]
+        title: String,
         requirement_refs: Vec<String>,
-        test_manifest: String,
-        environment: String,
+        #[serde(default)]
+        test_manifest: Option<String>,
+        #[serde(default)]
+        environment: Option<String>,
         #[serde(default)]
         contexts: Vec<String>,
         max_repairs: Option<u64>,

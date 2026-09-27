@@ -15,8 +15,8 @@ use crate::canonical::digest;
 use crate::error::{CoreError, Reason, Result};
 use crate::policy::{Effect, Policy, Sensitivity};
 
-pub const REDUCER_VERSION: u32 = 1;
-pub const SCHEMA_VERSION: u32 = 1;
+pub const REDUCER_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 2;
 
 // ---------------------------------------------------------------------------
 // Knowledge graph records
@@ -181,6 +181,30 @@ pub struct InputRecord {
     pub blob: String,
     pub byte_len: u64,
     pub rejected: Option<Vec<Reason>>,
+    /// Provenance of model output (provider, models, usage, raw response blob).
+    pub provider: Option<ProviderRecord>,
+    /// "proposal" (interpreted by `submit`) or "record" (`record_input`, e.g. chat).
+    pub kind: String,
+}
+
+/// Where a recorded model output came from. The raw provider response is
+/// stored as a protected blob and referenced here; prompts are not stored.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderRecord {
+    pub provider: String,
+    pub model_requested: String,
+    pub model_returned: String,
+    #[serde(default)]
+    pub response_id: String,
+    #[serde(default)]
+    pub response_blob: Option<String>,
+    #[serde(default)]
+    pub usage: Value,
+    #[serde(default)]
+    pub latency_ms: u64,
+    #[serde(default)]
+    pub attempts: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -254,9 +278,12 @@ pub enum TaskStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Task {
     pub task_id: String,
+    pub title: String,
     pub requirement_refs: Vec<String>,
-    pub test_manifest: String,
-    pub environment: String,
+    /// Protected acceptance manifest; `None` for tasks that only perform
+    /// operator-requested effects (e.g. export). Checks then fail closed.
+    pub test_manifest: Option<String>,
+    pub environment: Option<String>,
     pub contexts: Vec<String>,
     pub max_repairs: u64,
     pub status: TaskStatus,
@@ -279,6 +306,16 @@ pub struct TestManifest {
     pub manifest_id: String,
     pub digest: String,
     pub cases: Vec<TestCase>,
+    /// What the cases exercise (covered by the manifest digest).
+    pub entrypoint: Option<Entrypoint>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Entrypoint {
+    pub language: String,
+    pub path: String,
+    pub function: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1064,11 +1101,15 @@ fn apply_v1(s: &mut State, e: &Event) -> Result<()> {
             let a = require(&mut s.actions, action_id, "action")?;
             a.state = DispatchState::PostconditionsEvaluated;
             a.postconditions = Some(*result);
-            if *result == CheckResult::Pass && a.effect == Effect::Internal {
+            if *result == CheckResult::Pass {
                 let tid = a.task_id.clone();
                 let aid = a.action_id.clone();
+                let promotion = a.effect == Effect::Internal && a_is_promotion(a);
                 let task = require(&mut s.tasks, &tid, "task")?;
-                if task.status == TaskStatus::Open && a_is_promotion(&s.actions[&aid]) {
+                // A task completes when its promotion lands, or - for an
+                // effect-only task (no acceptance manifest) - when its
+                // effect's postconditions were verified.
+                if task.status == TaskStatus::Open && (promotion || task.test_manifest.is_none()) {
                     task.status = TaskStatus::Completed;
                     task.completed_by = Some(aid);
                 }

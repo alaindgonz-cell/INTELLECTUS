@@ -12,7 +12,7 @@ use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 
 use crate::canonical::to_canonical;
 use crate::error::{CoreError, Result};
-use crate::state::{Action, Event, State};
+use crate::state::{Action, Event, State, SCHEMA_VERSION};
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS meta (
@@ -126,6 +126,10 @@ impl Store {
             "INSERT INTO meta (key, value) VALUES ('project_id', ?1)",
             params![project_id],
         )?;
+        conn.execute(
+            "INSERT INTO meta (key, value) VALUES ('schema_version', ?1)",
+            params![SCHEMA_VERSION.to_string()],
+        )?;
         Ok(Store {
             conn,
             project_id: project_id.to_string(),
@@ -147,6 +151,24 @@ impl Store {
             })
             .optional()?
             .ok_or_else(|| CoreError::new("NOT_INITIALIZED", "no project in database"))?;
+        let version: Option<String> = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'schema_version'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if version.as_deref() != Some(SCHEMA_VERSION.to_string().as_str()) {
+            // No migration exists: v0.1 databases were demo-only. Halt rather
+            // than reinterpret history under a different schema.
+            return Err(CoreError::new(
+                "UNSUPPORTED_SCHEMA",
+                format!(
+                    "database schema {} is not supported by this build (schema {SCHEMA_VERSION}); re-initialize the project",
+                    version.as_deref().unwrap_or("1")
+                ),
+            ));
+        }
         Ok(Store { conn, project_id })
     }
 
@@ -196,6 +218,25 @@ impl Store {
             let body = row?;
             out.push(
                 serde_json::from_str::<Event>(&body).map_err(|e| {
+                    CoreError::new("UNSUPPORTED_SCHEMA", format!("event decode: {e}"))
+                })?,
+            );
+        }
+        Ok(out)
+    }
+
+    /// Events with `sequence > after`, oldest first, at most `limit`.
+    pub fn events_after(&self, after: u64, limit: u64) -> Result<Vec<Event>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT body FROM events WHERE project_id = ?1 AND sequence > ?2 ORDER BY sequence ASC LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(params![self.project_id, after as i64, limit as i64], |r| {
+            r.get::<_, String>(0)
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(
+                serde_json::from_str::<Event>(&row?).map_err(|e| {
                     CoreError::new("UNSUPPORTED_SCHEMA", format!("event decode: {e}"))
                 })?,
             );

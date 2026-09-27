@@ -1,4 +1,4 @@
-# THE INTELLECTUS — cross-language protocol v1
+# THE INTELLECTUS — cross-language protocol v1 (schema v2)
 
 This document is the binding contract between the three components:
 
@@ -225,3 +225,28 @@ disagreement between implementations in `cross` mode fails closed
 
 Limits: `N ≤ 1_000_000`, `R ≤ 1_000_000`, total body literals ≤ 10_000_000.
 Violations are malformed input.
+
+## 8. v0.2 additions (schema 2)
+
+Databases created by v0.1 (schema 1) are refused with `UNSUPPORTED_SCHEMA`;
+there is no migration (v0.1 databases were demo-only).
+
+* Roles `intake` (may only `record_input`) and `scheduler` (may only
+  `submit` envelopes of kind `action` — runtime-built actions such as
+  promoting a candidate that passed its checks).
+* `submit` and the new `record_input {session_id, raw, provider_record?}`
+  accept `provider_record = {provider, model_requested, model_returned,
+  response_id, raw_response, usage, latency_ms, attempts}`. `raw_response`
+  (the full provider response) is stored as a protected blob; prompts are
+  never stored. `usage` must be integer-only.
+* `register_test_manifest` takes an optional `entrypoint = {language:
+  "python", path, function}` covered by the manifest digest; `check_plan`
+  and `view` return it. Case expectations used by the sandbox runner are
+  `{"returns": <json>}` or `{"raises": "<ExceptionName>"}`.
+* `open_task` takes an optional `title`; `test_manifest` and `environment`
+  are optional — a task without them can never pass `acceptance_tests`
+  (fails closed with `MISSING_TEST_MANIFEST`) and completes only when an
+  external effect's postconditions pass (effect-only tasks such as export).
+* Read-only commands for the UI: `list_tasks {}`, `read_tree {root?}`,
+  `events_since {after, limit}` (with a one-line `summary` per event) and
+  `status {}` (policy, environments, deductor, approved root).
