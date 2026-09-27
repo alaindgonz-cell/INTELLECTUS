@@ -1,0 +1,8 @@
+INTELLECTUS-DEDUCE 1
+atoms 2
+facts 0
+rules 3
+2 1 1
+1 1 2
+-1 1 -1
+end
