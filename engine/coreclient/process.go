@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
+	"strings"
 	"time"
 )
 
@@ -22,6 +24,8 @@ type Process struct {
 // a client wired to its stdin/stdout. stderr (core logs) goes to logs.
 func Spawn(bin string, serveArgs []string, logs io.Writer) (*Process, error) {
 	cmd := exec.Command(bin, serveArgs...)
+	// The core needs no credentials: never let provider keys reach it.
+	cmd.Env = ScrubbedEnv(os.Environ())
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err
@@ -77,4 +81,29 @@ func RunCLI(ctx context.Context, bin string, args ...string) ([]byte, error) {
 		return out.Bytes(), err
 	}
 	return out.Bytes(), nil
+}
+
+// secretEnvMarkers are substrings of environment variable names that carry
+// credentials; such variables are removed from child processes that do not
+// need them.
+var secretEnvMarkers = []string{"API_KEY", "AUTH_TOKEN", "APIKEY", "SECRET", "PASSWORD", "ACCESS_TOKEN", "PRIVATE_KEY"}
+
+// ScrubbedEnv returns env without credential-bearing variables.
+func ScrubbedEnv(env []string) []string {
+	out := make([]string, 0, len(env))
+	for _, kv := range env {
+		name, _, _ := strings.Cut(kv, "=")
+		up := strings.ToUpper(name)
+		secret := false
+		for _, m := range secretEnvMarkers {
+			if strings.Contains(up, m) {
+				secret = true
+				break
+			}
+		}
+		if !secret {
+			out = append(out, kv)
+		}
+	}
+	return out
 }

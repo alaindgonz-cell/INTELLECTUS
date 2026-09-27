@@ -210,11 +210,24 @@ type TestCase struct {
 	Expect json.RawMessage `json:"expect"`
 }
 
+// Entrypoint names the function a protected acceptance manifest exercises.
+// Covered by the manifest digest (operator-approved, not candidate-editable).
+type Entrypoint struct {
+	// Language is "python" (the only supported language in v0.2).
+	Language string `json:"language"`
+	// Path is the module file inside the candidate tree, e.g. "src/page_size.py".
+	Path string `json:"path"`
+	// Function is the callable invoked once per case with the case input as
+	// its single positional argument.
+	Function string `json:"function"`
+}
+
 // TestManifest as carried in a CheckRequest.
 type TestManifest struct {
-	ID     string     `json:"id"`
-	Digest string     `json:"digest"`
-	Cases  []TestCase `json:"cases"`
+	ID         string      `json:"id"`
+	Digest     string      `json:"digest"`
+	Cases      []TestCase  `json:"cases"`
+	Entrypoint *Entrypoint `json:"entrypoint,omitempty"`
 }
 
 // CheckSubject binds a check to one proposal payload.

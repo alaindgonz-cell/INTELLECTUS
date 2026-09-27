@@ -9,6 +9,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -32,6 +33,24 @@ type Report struct {
 	Collected int
 	Completed bool
 	Summary   string
+	// Details are engine-side per-case observations (expected vs. observed,
+	// bounded output). They are never sent to the core as a verdict; the
+	// harness uses them for repair context and the UI.
+	Details []CaseDetail
+}
+
+// CaseDetail is what a real worker observed for one case.
+type CaseDetail struct {
+	Name     string          `json:"name"`
+	Status   string          `json:"status"` // PASS / FAIL / ERROR / TIMEOUT
+	Input    json.RawMessage `json:"input"`
+	Expected json.RawMessage `json:"expected"`
+	// Observed is {"returns": v} or {"raises": "Name", "message": "..."} or
+	// {"error": "..."} when nothing usable was observed.
+	Observed   json.RawMessage `json:"observed,omitempty"`
+	Stdout     string          `json:"stdout,omitempty"`
+	Stderr     string          `json:"stderr,omitempty"`
+	DurationMS int64           `json:"duration_ms"`
 }
 
 // Worker evaluates one CheckRequest against a materialized candidate tree.

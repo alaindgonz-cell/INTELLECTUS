@@ -13,6 +13,7 @@ package advisor
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strconv"
 	"sync"
@@ -48,6 +49,12 @@ type Advice struct {
 	Mode        string
 	Usage       map[string]int64
 	ProviderRef string
+	// CostUSD is the provider-reported cost as a decimal string ("" when
+	// unknown). Optional; informational only.
+	CostUSD string
+	// Raw is the provider's raw response body, kept for provenance
+	// (ProviderRef is its digest). Optional.
+	Raw json.RawMessage
 }
 
 // DecisionAdvisor is the Jev seam.
