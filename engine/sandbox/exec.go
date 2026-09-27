@@ -44,6 +44,7 @@ type caseRun struct {
 	cpu        time.Duration  // user+sys of the whole reaped tree
 	duration   time.Duration
 	hostUID    uint32
+	nproc      int // RLIMIT_NPROC the sandbox was launched with
 }
 
 // capBuf keeps the first limit bytes written and counts the rest.
@@ -109,7 +110,14 @@ func (w *Worker) runCase(ctx context.Context, spec caseSpec) caseRun {
 	}
 	defer resR.Close()
 
-	cmd := exec.CommandContext(caseCtx, w.prlimit, w.commandArgs(spec.workDir, spec.driverFile)...)
+	nproc, err := w.nprocLimit()
+	if err != nil {
+		resW.Close()
+		r.startErr = err
+		return r
+	}
+	r.nproc = nproc
+	cmd := exec.CommandContext(caseCtx, w.prlimit, w.commandArgs(spec.workDir, spec.driverFile, strconv.Itoa(nproc))...)
 	cmd.Env = []string{} // non-nil: nothing inherited (bwrap's own env is readable via /proc/1/environ inside)
 	cmd.Dir = "/"
 	cmd.Stdin = bytes.NewReader(spec.request)
@@ -206,13 +214,14 @@ func (w *Worker) runCase(ctx context.Context, spec caseSpec) caseRun {
 
 // killSandbox kills a running sandbox whose launcher (prlimit, exec'd into
 // the bwrap monitor) has host pid pid. The monitor's only child is the
-// sandbox's pid-namespace init (it runs in its own session, see
-// --new-session). Killing that init first makes the kernel kill every
-// process in the namespace and wait for them before the init is reaped by
-// the monitor, which then exits: when Wait returns, nothing of the sandbox
-// is left. Killing the monitor first would orphan the init and leave the
-// teardown to the host's pid 1. With no child yet (still in bwrap setup)
-// the monitor's process group is killed instead.
+// interpreter, which is the sandbox's pid-namespace init (--as-pid-1; it
+// runs in its own session, --new-session). Killing it first makes the
+// kernel kill every other process in the namespace before the interpreter
+// is reaped by the monitor, which then exits: when Wait returns, nothing of
+// the sandbox is left. Killing the monitor first would orphan the
+// interpreter (--die-with-parent would still kill it, but asynchronously,
+// leaving the reaping to the host's pid 1). With no child yet (still in
+// bwrap setup) the monitor's process group is killed instead.
 func killSandbox(pid int) error {
 	kids := childrenOf(pid)
 	for _, k := range kids {

@@ -114,24 +114,38 @@ func logReport(t *testing.T, rep runner.Report) {
 	}
 }
 
-// sandboxProcesses lists host processes running as any of uids.
-func sandboxProcesses(uids []uint32) []int {
-	var out []int
-	for pid := range processTable() {
+// leakedSandboxProcesses lists host processes running as any of uids that
+// could only have come from this test process: its descendants, or orphans
+// adopted by the host init (what a sandbox that outlived its monitor would
+// be). Sandboxes of other processes (e.g. a concurrent `go test ./...`) are
+// ignored.
+func leakedSandboxProcesses(uids []uint32) []string {
+	table := processTable()
+	self := os.Getpid()
+	var out []string
+	for pid, ppid := range table {
 		b, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid))
 		if err != nil {
 			continue
 		}
+		var uid uint64 = 1 << 40
 		for _, line := range strings.Split(string(b), "\n") {
 			if rest, ok := strings.CutPrefix(line, "Uid:"); ok {
-				f := strings.Fields(rest)
-				if len(f) > 0 {
-					u, _ := strconv.ParseUint(f[0], 10, 32)
-					if containsUID(uids, uint32(u)) {
-						out = append(out, pid)
-					}
+				if f := strings.Fields(rest); len(f) > 0 {
+					uid, _ = strconv.ParseUint(f[0], 10, 32)
 				}
 			}
+		}
+		if uid > 1<<32 || !containsUID(uids, uint32(uid)) {
+			continue
+		}
+		ours := ppid == 1
+		for p, hops := ppid, 0; p > 1 && hops < 64 && !ours; p, hops = table[p], hops+1 {
+			ours = p == self
+		}
+		if ours {
+			cmd, _ := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
+			out = append(out, fmt.Sprintf("pid %d ppid %d uid %d %q", pid, ppid, uid, bytes.ReplaceAll(cmd, []byte{0}, []byte{' '})))
 		}
 	}
 	return out
@@ -506,6 +520,11 @@ func (e *t19Env) port() int { return e.listener.Addr().(*net.TCPAddr).Port }
 
 func (e *t19Env) assertHostUnaffected(t *testing.T, w *Worker, root string) {
 	t.Helper()
+	// Teardown is synchronous (see killSandbox, --as-pid-1): nothing of a
+	// sandbox may exist once Run has returned. No grace period.
+	if left := leakedSandboxProcesses(w.HostUIDs()); len(left) > 0 {
+		t.Errorf("sandbox processes survive Run: %v", left)
+	}
 	got, err := os.ReadFile(e.canary)
 	if err != nil || !bytes.Equal(got, e.canaryBefore) {
 		t.Errorf("canary changed: %q %v", got, err)
@@ -513,12 +532,9 @@ func (e *t19Env) assertHostUnaffected(t *testing.T, w *Worker, root string) {
 	if fi, err := os.Stat(e.canary); err != nil || !fi.ModTime().Equal(e.canaryMod) {
 		t.Errorf("canary mtime changed")
 	}
-	time.Sleep(100 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond) // let a (wrongly) accepted connection be counted
 	if n := e.accepted.Load(); n != 0 {
 		t.Errorf("host listener accepted %d connections from the sandbox", n)
-	}
-	if left := sandboxProcesses(w.HostUIDs()); len(left) > 0 && os.Geteuid() == 0 {
-		t.Errorf("processes of the sandbox uids survive: %v", left)
 	}
 	entries, _ := os.ReadDir(root)
 	if len(entries) != 0 {
@@ -530,10 +546,10 @@ func t19Worker(t *testing.T, root string, timeout time.Duration) *Worker {
 	cfg := Config{WorkRoot: root, CaseTimeout: timeout, MaxOutputBytes: 8192}
 	if os.Geteuid() == 0 {
 		// Distinct host uids per concurrent sandbox so the fork bomb's
-		// RLIMIT_NPROC budget (accounted per host uid) is its own.
+		// RLIMIT_NPROC budget (accounted per host uid) is its own. Not as
+		// root the limit is relative to the uid's task count at launch
+		// (see nprocLimit), so concurrent sandboxes do not starve each other.
 		cfg.ExtraUIDs = []uint32{65533, 65532, 65531}
-	} else {
-		cfg.MaxParallel = 1
 	}
 	return newWorker(t, cfg)
 }
@@ -693,7 +709,7 @@ func TestCPULimitIsTimeout(t *testing.T) {
 
 // ---- semantics: FAIL vs ERROR ---------------------------------------------
 
-const semanticsModule = `import math, os, signal, sys
+const semanticsModule = `import ctypes, math, os, signal, sys
 
 
 def f(kind):
@@ -716,8 +732,13 @@ def f(kind):
     if kind == "stdout_json":
         print('{"returns": 42}')
         return 41
-    if kind == "suicide":
+    if kind == "segfault":
+        ctypes.string_at(0)
+    if kind == "self_sigkill":
+        # The interpreter is its pid namespace's init: signals it sends
+        # itself without a handler are ignored by the kernel.
         os.kill(os.getpid(), signal.SIGKILL)
+        return "still alive"
     if kind == "exit3":
         os._exit(3)
     if kind == "unicode":
@@ -737,7 +758,8 @@ func TestSemantics(t *testing.T) {
 		{"subclass_matches_mro", `"keyerror"`, `{"raises":"LookupError"}`},
 		{"sys_exit_is_not_value_error", `"sys_exit"`, `{"raises":"ValueError"}`},
 		{"stdout_never_parsed", `"stdout_json"`, `{"returns":42}`},
-		{"killed_by_signal", `"suicide"`, `{"returns":1}`},
+		{"killed_by_signal", `"segfault"`, `{"returns":1}`},
+		{"self_sigkill_ignored_as_pid1", `"self_sigkill"`, `{"returns":"still alive"}`},
 		{"exit_without_result", `"exit3"`, `{"returns":1}`},
 		{"unicode", `"unicode"`, `{"returns":"\u0661\u00e9\ud83d\ude00"}`},
 		{"object_key_order", `"x"`, `{"returns":{"echo":"x"}}`},
@@ -753,7 +775,7 @@ func TestSemantics(t *testing.T) {
 		"tuple_is_list": "PASS", "float_equals_int": "PASS", "bool_is_not_int": "FAIL",
 		"set_not_serializable": "FAIL", "nan_not_serializable": "FAIL", "int_key_not_serializable": "FAIL",
 		"subclass_matches_mro": "PASS", "sys_exit_is_not_value_error": "FAIL", "stdout_never_parsed": "FAIL",
-		"killed_by_signal": "ERROR", "exit_without_result": "ERROR", "unicode": "PASS", "object_key_order": "PASS",
+		"killed_by_signal": "ERROR", "self_sigkill_ignored_as_pid1": "PASS", "exit_without_result": "ERROR", "unicode": "PASS", "object_key_order": "PASS",
 		"unsupported_expectation": "ERROR", "returns_when_raise_expected": "FAIL",
 	}
 	if got := statuses(rep); !reflect.DeepEqual(got, want) {
@@ -886,7 +908,7 @@ func TestNewValidatesAndDigest(t *testing.T) {
 	}
 	t.Logf("digest %s", w1.ImplementationDigest())
 	t.Logf("python %s; bwrap %q; python %q", w1.Python(), w1.bwrapVersion, w1.pythonVersion)
-	t.Logf("argv: %s %s", w1.prlimit, strings.Join(w1.commandArgs("<RUNDIR>/work", "<RUNDIR>/driver.py"), " "))
+	t.Logf("argv: %s %s", w1.prlimit, strings.Join(w1.commandArgs("<RUNDIR>/work", "<RUNDIR>/driver.py", w1.nprocDescription()), " "))
 
 	outside := filepath.Join(root, "python3")
 	if err := os.WriteFile(outside, []byte("#!/bin/sh\n"), 0o755); err != nil {

@@ -492,9 +492,14 @@ func (p *prober) tmpBounded() (bool, string) {
 		int64(written), obs["error"], c.TmpfsBytes, int64(sb), single["error"], c.MaxFileSizeBytes))
 }
 
+// nonRootNprocSlack is how far above MaxProcs a fork loop may get in
+// non-root mode, where the limit is relative to the engine uid's task count
+// at launch and tasks of the user that exit meanwhile free budget.
+const nonRootNprocSlack = 32
+
 func (p *prober) processLimit() (bool, string) {
 	const bomb = 10000
-	obs, _, err := p.call(map[string]any{"name": "fork", "cap": bomb}, 0, nil)
+	obs, run, err := p.call(map[string]any{"name": "fork", "cap": bomb}, 0, nil)
 	if err != nil {
 		return false, err.Error()
 	}
@@ -503,11 +508,18 @@ func (p *prober) processLimit() (bool, string) {
 	if obs["error"] == nil {
 		problems = append(problems, "fork loop never failed")
 	}
-	if int(forks) >= p.w.cfg.MaxProcs {
-		problems = append(problems, fmt.Sprintf("%d forks succeeded (MaxProcs %d)", int(forks), p.w.cfg.MaxProcs))
+	allowed := p.w.cfg.MaxProcs
+	mode := fmt.Sprintf("absolute RLIMIT_NPROC %d for dedicated host uid %d", run.nproc, run.hostUID)
+	if !p.w.asRoot {
+		allowed += nonRootNprocSlack
+		mode = fmt.Sprintf("RELATIVE RLIMIT_NPROC %d = %d tasks of uid %d at launch + MaxProcs %d (accepted up to MaxProcs+%d extra)",
+			run.nproc, run.nproc-p.w.cfg.MaxProcs, run.hostUID, p.w.cfg.MaxProcs, nonRootNprocSlack)
 	}
-	return verdict(problems, fmt.Sprintf("fork loop stopped after %d children with %v (RLIMIT_NPROC %d per host uid; loop cap %d)",
-		int(forks), obs["error"], p.w.cfg.MaxProcs, bomb))
+	if int(forks) >= allowed {
+		problems = append(problems, fmt.Sprintf("%d forks succeeded (allowed below %d)", int(forks), allowed))
+	}
+	return verdict(problems, fmt.Sprintf("fork loop stopped after %d children with %v (%s; loop cap %d)",
+		int(forks), obs["error"], mode, bomb))
 }
 
 func (p *prober) memoryLimit() (bool, string) {

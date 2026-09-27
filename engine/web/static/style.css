@@ -232,14 +232,17 @@ button.digest.copied { border-color: var(--ok-border); color: var(--ok); backgro
 
 .topbar {
   flex: none;
-  display: flex; align-items: center; flex-wrap: wrap;
-  gap: 10px 18px;
-  padding: 10px var(--gutter);
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-areas: "brand pills end";
+  align-items: center;
+  gap: 8px 12px;
+  padding: 9px var(--gutter);
   background: var(--surface);
   border-bottom: 1px solid var(--border);
 }
 
-.brand { display: flex; align-items: center; gap: 10px; flex: none; }
+.brand { grid-area: brand; display: flex; align-items: center; gap: 10px; }
 .brand-mark {
   width: 22px; height: 22px; border-radius: 6px;
   background: var(--accent);
@@ -254,18 +257,18 @@ button.digest.copied { border-color: var(--ok-border); color: var(--ok); backgro
   width: 4px; height: 4px; margin: -2px 0 0 -2px; border-radius: 50%; background: #fff;
 }
 .wordmark {
-  font-weight: 750; font-size: 15px; letter-spacing: .2em;
+  font-weight: 750; font-size: 15px; letter-spacing: .14em;
   color: var(--text);
 }
 
-.pills { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; }
+.pills { grid-area: pills; display: flex; flex-wrap: wrap; gap: 5px; min-width: 0; }
 .pill {
-  display: inline-flex; align-items: center; gap: 6px;
-  height: 28px; padding: 0 10px;
+  display: inline-flex; align-items: center; gap: 5px;
+  height: 28px; padding: 0 8px;
   border-radius: 999px;
   border: 1px solid var(--border);
   background: var(--surface-2);
-  font-size: 12.5px; line-height: 1;
+  font-size: 12px; line-height: 1;
   white-space: nowrap; max-width: 100%;
 }
 .pill:hover { border-color: var(--border-strong); background: var(--surface-3); }
@@ -280,11 +283,12 @@ button.digest.copied { border-color: var(--ok-border); color: var(--ok); backgro
 .pill-value { color: var(--muted); overflow: hidden; text-overflow: ellipsis; }
 .pill-value b { font-weight: 600; color: var(--text-2); }
 
-.topbar-end { display: flex; align-items: center; gap: 16px; margin-left: auto; }
+.topbar-end { grid-area: end; display: flex; align-items: center; gap: 12px; justify-self: end; }
+@media (max-width: 1599px) { .pill .tert { display: none; } }
 
 .jev-control { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; }
 .jev-row { display: flex; align-items: center; gap: 8px; }
-.jev-title { font-size: 12px; font-weight: 600; color: var(--text-2); }
+.jev-title { font-size: 11.5px; font-weight: 600; color: var(--text-2); }
 .jev-help { font-size: 11px; color: var(--muted); white-space: nowrap; }
 
 .seg {
@@ -294,7 +298,7 @@ button.digest.copied { border-color: var(--ok-border); color: var(--ok); backgro
 }
 .seg button {
   border: 0; background: transparent;
-  height: 24px; padding: 0 10px; border-radius: 6px;
+  height: 24px; padding: 0 8px; border-radius: 6px;
   font-size: 12px; font-weight: 600; color: var(--muted);
 }
 .seg button:hover:not(:disabled) { color: var(--text); }
@@ -885,6 +889,13 @@ table.diff tr.ctx td.code { color: var(--text-2); }
 .pop-close:hover { background: var(--surface-3); color: var(--text); }
 .popover .kv { font-size: 12.5px; }
 .popover .kv dd.mono { font-family: var(--mono); font-size: 12px; }
+.popover .mono { overflow-wrap: anywhere; word-break: break-all; }
+.digest-full {
+  font-family: var(--mono); font-size: 12px; line-height: 1.5; color: var(--text-2);
+  padding: 7px 9px; border-radius: var(--radius-sm); background: var(--surface-2); border: 1px solid var(--border);
+  overflow-wrap: anywhere; word-break: break-all;
+}
+.section-label .link-btn { margin-left: 8px; text-transform: none; letter-spacing: 0; font-size: 11.5px; }
 .pop-section { margin-top: 12px; }
 .pop-section > .section-label { margin-bottom: 6px; }
 .pop-note { margin-top: 10px; font-size: 12px; color: var(--muted); }
@@ -901,16 +912,23 @@ table.diff tr.ctx td.code { color: var(--text-2); }
 
 @media (max-width: 1279px) {
   .jev-help { display: none; }
+  .pill .sec { display: none; }
 }
 
 @media (max-width: 1023px) {
-  .topbar { padding: 8px var(--gutter); gap: 8px 10px; }
-  .pills {
-    order: 3; width: calc(100% + 2 * var(--gutter)); margin: 0 calc(-1 * var(--gutter));
-    padding: 0 var(--gutter) 2px; gap: 5px;
-    flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none;
+  .topbar {
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas: "brand end" "pills pills";
+    padding: 8px var(--gutter); gap: 8px 10px;
   }
-  .pills::-webkit-scrollbar { display: none; }
+  .pills, .filter-bar {
+    flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none;
+    -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent);
+    mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent);
+  }
+  .pills { margin: 0 calc(-1 * var(--gutter)); padding: 0 var(--gutter) 2px; gap: 5px; }
+  .pills::-webkit-scrollbar, .filter-bar::-webkit-scrollbar { display: none; }
+  .fchip { flex: none; }
   .pill { height: 28px; padding: 0 10px; font-size: 12.5px; flex: none; }
   .pill .sec { display: none; }
   .composer textarea { font-size: 16px; }

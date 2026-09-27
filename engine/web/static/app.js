@@ -365,12 +365,22 @@
     if (title) pill.title = title;
   }
 
+  let lastApprovedRoot = null;
+
   function renderStatus() {
     const s = state.status;
     if (!s) return;
+    if (lastApprovedRoot !== null && s.approved_root !== lastApprovedRoot && state.files.loaded && state.files.mode === 'tree' && !state.files.root) {
+      loadTree();
+    }
+    lastApprovedRoot = s.approved_root || '';
+    if (state.pendingReply && !s.busy && Date.now() - state.pendingReply > 3000) {
+      state.pendingReply = 0;
+      $('typing').hidden = true;
+    }
     const core = s.core || {};
     // .sec parts are secondary and hidden on narrow screens.
-    const sec = (text) => (text ? h('span', { class: 'sec' }, text) : null);
+    const sec = (text, cls) => (text ? h('span', { class: cls || 'sec' }, text) : null);
     setPill('pill-core', s.busy ? 'run' : 'ok',
       [h('b', null, '#' + fmtInt(s.head_sequence)), sec(' · ' + (core.deductor || '—'))],
       'Core head sequence ' + s.head_sequence + (s.busy ? ' — working' : ''));
@@ -381,7 +391,7 @@
     const jevTone = mode === 'OFF' ? 'neutral' : !jev.configured ? 'warn' : mode === 'LIVE' ? 'ok' : 'info';
     setPill('pill-jev', jevTone, [h('b', null, mode), jev.configured ? sec(jev.model ? ' · ' + jev.model : '') : ' · not configured']);
     const sb = sandboxState(s.sandbox);
-    setPill('pill-sandbox', sb.tone, [sb.label, sec(s.sandbox && s.sandbox.kind ? ' · ' + s.sandbox.kind : '')]);
+    setPill('pill-sandbox', sb.tone, [sb.label, sec(s.sandbox && s.sandbox.kind ? ' · ' + s.sandbox.kind : '', 'sec tert')]);
     const u = s.usage || {};
     const tokens = (Number(u.input_tokens) || 0) + (Number(u.output_tokens) || 0);
     setPill('pill-usage', 'info', [sec(fmtInt(u.model_calls ?? 0) + ' calls · ' + fmtTokens(tokens) + ' tok · '), '≈' + fmtUsd(u.estimated_cost_usd ?? 0, 2) + ' est.'],
@@ -445,6 +455,7 @@
   // -------------------------------------------------------------- popover
 
   let popAnchor = null;
+  let trustBusy = false;
 
   function kv(rows) {
     const dl = h('dl', { class: 'kv' });
@@ -536,12 +547,35 @@
         ['Available', sb.available ? 'yes' : 'no'],
         ['Verified', sb.verified ? 'yes' : 'no'],
         ['Trusted', sb.trusted ? 'yes' : 'no'],
-        ['Implementation', sb.implementation_digest ? digestButton(sb.implementation_digest) : ''],
         ['Verified at', fmtDateTime(sb.verified_at)],
       ]), detail(sb.detail)];
       if (sb.implementation_digest) {
-        nodes.push(h('div', { class: 'pop-section' }, h('div', { class: 'section-label' }, 'Implementation digest'),
-          h('div', { class: 'mono small' }, String(sb.implementation_digest))));
+        const full = String(sb.implementation_digest);
+        const copy = h('button', { type: 'button', class: 'link-btn', 'aria-label': 'Copy implementation digest' }, 'Copy');
+        copy.addEventListener('click', () => copyText(full, copy, 'Copy'));
+        nodes.push(h('div', { class: 'pop-section' }, h('div', { class: 'section-label' }, 'Implementation digest', copy),
+          h('div', { class: 'digest-full' }, full)));
+      }
+      if (sb.trusted === false) {
+        const btn = h('button', { type: 'button', class: 'btn btn-primary btn-sm', disabled: trustBusy || state.expired }, trustBusy ? 'Trusting…' : 'Trust this sandbox');
+        btn.addEventListener('click', async () => {
+          if (trustBusy) return;
+          trustBusy = true;
+          btn.disabled = true;
+          btn.textContent = 'Trusting…';
+          try {
+            await api('/api/policy/trust-sandbox', { method: 'POST' });
+            toast('Sandbox implementation trusted (signed policy change).');
+            trustBusy = false;
+            await loadStatus();
+          } catch (err) {
+            trustBusy = false;
+            reportError(err);
+            if (state.popover) renderPopover();
+          }
+        });
+        nodes.push(h('div', { class: 'pop-actions' }, btn),
+          h('p', { class: 'pop-note' }, 'Trusting signs a policy change: the core will accept acceptance-test receipts from this exact implementation digest.'));
       }
       nodes.push(h('div', { class: 'pop-section' },
         h('div', { class: 'section-label' }, 'Probes (' + probes.filter((p) => p.ok).length + '/' + probes.length + ' passed)'),
@@ -551,24 +585,6 @@
             h('span', { class: 'pn' }, p.name),
             h('span', { class: 'pd' }, p.detail || ''))))
           : h('p', { class: 'muted small' }, 'No probe results reported.')));
-      if (sb.trusted === false) {
-        const btn = h('button', { type: 'button', class: 'btn btn-primary btn-sm' }, 'Trust this sandbox');
-        btn.addEventListener('click', async () => {
-          btn.disabled = true;
-          btn.textContent = 'Trusting…';
-          try {
-            await api('/api/policy/trust-sandbox', { method: 'POST' });
-            toast('Sandbox implementation trusted (signed policy change).');
-            await loadStatus();
-          } catch (err) {
-            reportError(err);
-            btn.disabled = false;
-            btn.textContent = 'Trust this sandbox';
-          }
-        });
-        nodes.push(h('div', { class: 'pop-actions' }, btn),
-          h('p', { class: 'pop-note' }, 'Trusting signs a policy change: the core will accept acceptance-test receipts from this exact implementation digest.'));
-      }
       return nodes;
     }
     if (which === 'usage') {
@@ -1388,8 +1404,12 @@
     if (options.some(([v]) => v === prev)) sel.value = prev;
   }
 
+  let rootsSig = '';
   function renderRootSelects() {
     const approved = state.status && state.status.approved_root;
+    const sig = [approved, state.files.root, state.files.from, state.files.to, ...[...state.knownRoots].map(([d, l]) => d + ':' + [...l].join(','))].join('|');
+    if (sig === rootsSig) return;
+    rootsSig = sig;
     const roots = [...state.knownRoots.keys()];
     const treeOpts = [['', 'Approved root' + (approved ? ' (' + shortDigest(approved) + ')' : '')]];
     for (const d of roots) if (d !== approved) treeOpts.push([d, rootLabel(d)]);
@@ -2017,12 +2037,14 @@
     for (const b of document.querySelectorAll('#mobile-tabs [role="tab"]')) b.addEventListener('click', () => setMobileView(b.dataset.mview));
     tablistKeys($('work-tabs'), '[role="tab"]');
     tablistKeys($('mobile-tabs'), '[role="tab"]');
+    // Pick a placeholder that fits on one line of the current textarea width.
     const syncPlaceholder = () => {
-      if (!state.expired) ta.placeholder = mobileQuery.matches ? 'Message INTELLECTUS…' : 'Describe a change, or ask about the project…';
+      if (state.expired || !ta.clientWidth) return;
+      ta.placeholder = ta.clientWidth >= 360 ? 'Describe a change, or ask about the project…' : 'Message INTELLECTUS…';
     };
+    if (window.ResizeObserver) new ResizeObserver(syncPlaceholder).observe(ta);
     syncPlaceholder();
     mobileQuery.addEventListener('change', () => {
-      syncPlaceholder();
       if (!mobileQuery.matches) setWorkTab(state.workTab);
     });
 
@@ -2039,7 +2061,11 @@
     renderTasks();
     refetchAll();
     connectStream();
-    setInterval(() => { tickElapsed(); watchdog(); }, 1000);
+    setInterval(() => {
+      tickElapsed();
+      watchdog();
+      if (state.pendingReply && Date.now() - state.pendingReply > 90000) { state.pendingReply = 0; $('typing').hidden = true; }
+    }, 1000);
   }
 
   init();

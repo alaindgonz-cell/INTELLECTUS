@@ -179,7 +179,7 @@ func New(cfg Config) (*Worker, error) {
 	case cfg.AddressSpaceBytes < 64<<20:
 		return nil, errors.New("sandbox: AddressSpaceBytes must be >= 64 MiB (the interpreter needs it)")
 	case cfg.MaxProcs < 4:
-		return nil, errors.New("sandbox: MaxProcs must be >= 4 (bwrap monitor, bwrap init, interpreter)")
+		return nil, errors.New("sandbox: MaxProcs must be >= 4 (bwrap monitor, interpreter, headroom)")
 	case cfg.MaxOpenFiles < 16:
 		return nil, errors.New("sandbox: MaxOpenFiles must be >= 16")
 	case cfg.MaxFileSizeBytes < 1:
@@ -324,11 +324,11 @@ func (w *Worker) describe() ([]byte, error) {
 			"pdeathsig":             "SIGKILL",
 			"env":                   []string{},
 			"inherited_fds":         []int{0, 1, 2, 3},
-			"kill_on_timeout":       "SIGKILL to sandbox init (then monitor process group)",
+			"kill_on_timeout":       "SIGKILL to the interpreter (pid-namespace init); monitor killed after WaitDelay",
 			"cpu_limit_status":      "TIMEOUT",
 			"exit_status_by_signal": "ERROR",
 		},
-		Prlimit:        w.prlimitArgs(),
+		Prlimit:        w.prlimitArgs(w.nprocDescription()),
 		Bwrap:          w.bwrapArgs("<RUNDIR>/work", "<RUNDIR>/driver.py"),
 		Interpreter:    w.interpreterArgs(),
 		CaseTimeoutMS:  w.cfg.CaseTimeout.Milliseconds(),
@@ -339,15 +339,19 @@ func (w *Worker) describe() ([]byte, error) {
 	return json.Marshal(d)
 }
 
-// prlimitArgs are the prlimit options (without the program). CPU uses a
-// soft limit one second below the hard limit so an exhausted CPU budget
-// shows up as SIGXCPU (reported as TIMEOUT) rather than a bare SIGKILL.
-func (w *Worker) prlimitArgs() []string {
+// prlimitArgs are the prlimit options (without the program). RLIMIT_CPU
+// uses soft == hard: the interpreter is its pid namespace's init, and the
+// kernel does not deliver SIGXCPU (the soft-limit signal) to a namespace
+// init without a handler, only the hard-limit SIGKILL. A SIGKILL death with
+// the CPU budget used up is classified as TIMEOUT from the reaped rusage.
+//
+// nproc is the RLIMIT_NPROC value (see nprocLimit).
+func (w *Worker) prlimitArgs(nproc string) []string {
 	c := w.cfg
 	return []string{
-		fmt.Sprintf("--cpu=%d:%d", c.CPUSeconds, c.CPUSeconds+1),
+		fmt.Sprintf("--cpu=%d", c.CPUSeconds),
 		fmt.Sprintf("--as=%d", c.AddressSpaceBytes),
-		fmt.Sprintf("--nproc=%d", c.MaxProcs),
+		"--nproc=" + nproc,
 		fmt.Sprintf("--nofile=%d", c.MaxOpenFiles),
 		fmt.Sprintf("--fsize=%d", c.MaxFileSizeBytes),
 		"--core=0",
@@ -363,6 +367,13 @@ func (w *Worker) bwrapArgs(workDir, driverFile string) []string {
 		"--unshare-user",
 		"--unshare-cgroup",
 		"--disable-userns", "--assert-userns-disabled",
+		// The interpreter itself is the pid-namespace init: when it exits
+		// the kernel kills and reaps everything else in the namespace and
+		// the bwrap monitor reaps the interpreter before exiting, so
+		// teardown is synchronous with Wait. (bwrap's own init would be
+		// left for the host's pid 1 to reap: the monitor exits without
+		// waiting for it.)
+		"--as-pid-1",
 		"--die-with-parent",
 		"--new-session",
 		"--cap-drop", "ALL",
@@ -417,9 +428,75 @@ func (w *Worker) interpreterArgs() []string {
 	return []string{w.python, "-s", "-B", sandboxDriver}
 }
 
+// nprocLimit is the RLIMIT_NPROC value for a sandbox launched now.
+//
+// The kernel counts RLIMIT_NPROC per real HOST uid, over every task
+// (thread) of that uid in all namespaces. As root, sandboxes run as a
+// dedicated uid, so the limit is simply MaxProcs. Not as root, sandboxes
+// run as the engine's own uid, which already owns the engine, the user's
+// shell, editor, ... ; an absolute MaxProcs would usually be exceeded before
+// the sandbox starts. The limit is then RELATIVE: the number of tasks the
+// uid owns at launch time plus MaxProcs, so a fork bomb still gets only
+// about MaxProcs extra tasks. The bound is racy: tasks of the user that
+// exit while the sandbox runs free budget the sandbox may take, and tasks
+// the user starts meanwhile shrink it (and are themselves limited only by
+// their own rlimits, not by the sandbox's).
+func (w *Worker) nprocLimit() (int, error) {
+	if w.asRoot {
+		return w.cfg.MaxProcs, nil
+	}
+	n, err := countTasksOfUID(uint32(os.Getuid()))
+	if err != nil {
+		return 0, fmt.Errorf("counting tasks of uid %d: %w", os.Getuid(), err)
+	}
+	return n + w.cfg.MaxProcs, nil
+}
+
+// nprocDescription is the nproc limit as covered by the digest.
+func (w *Worker) nprocDescription() string {
+	if w.asRoot {
+		return strconv.Itoa(w.cfg.MaxProcs)
+	}
+	return fmt.Sprintf("<tasks of real uid at launch>+%d", w.cfg.MaxProcs)
+}
+
+// countTasksOfUID sums the Threads of every visible process whose real
+// uid is uid (RLIMIT_NPROC counts tasks, i.e. threads, by real uid).
+func countTasksOfUID(uid uint32) (int, error) {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return 0, err
+	}
+	total := 0
+	for _, e := range entries {
+		if _, err := strconv.Atoi(e.Name()); err != nil {
+			continue
+		}
+		b, err := os.ReadFile("/proc/" + e.Name() + "/status")
+		if err != nil {
+			continue // exited meanwhile
+		}
+		var realUID int64 = -1
+		threads := 0
+		for _, line := range strings.Split(string(b), "\n") {
+			if rest, ok := strings.CutPrefix(line, "Uid:"); ok {
+				if f := strings.Fields(rest); len(f) > 0 {
+					realUID, _ = strconv.ParseInt(f[0], 10, 64)
+				}
+			} else if rest, ok := strings.CutPrefix(line, "Threads:"); ok {
+				threads, _ = strconv.Atoi(strings.TrimSpace(rest))
+			}
+		}
+		if realUID == int64(uid) {
+			total += max(threads, 1)
+		}
+	}
+	return total, nil
+}
+
 // commandArgs is the full argv after prlimit.
-func (w *Worker) commandArgs(workDir, driverFile string) []string {
-	a := w.prlimitArgs()
+func (w *Worker) commandArgs(workDir, driverFile, nproc string) []string {
+	a := w.prlimitArgs(nproc)
 	a = append(a, "--", w.bwrap)
 	a = append(a, w.bwrapArgs(workDir, driverFile)...)
 	a = append(a, "--")
