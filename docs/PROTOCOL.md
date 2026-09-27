@@ -85,6 +85,10 @@ runner); `gateway` (tool gateway); `advisor` (Jev / DecisionAdvisor).
 | `task_report` | `{task_id}` | final report, §4.3 |
 | `replay_verify` | `{}` | `{events, state_digest, matches}` |
 
+`failure_codes` use the core's own reason codes (e.g. `CHECK_FAILED`,
+`MISSING_APPROVAL`, `REPAIR_BUDGET_EXHAUSTED`). Malformed request lines are
+answered with `"id": null`; the engine treats that as a desync.
+
 Route options: `GATHER_CONTEXT`, `REPAIR`, `REPLAN`, `ESCALATE`, `STOP`.
 `record_assessment` validates `choice` against the core's own eligible set;
 a choice outside it, `mode != LIVE`, or `confidence_bp` below the policy
@@ -147,6 +151,12 @@ else is recorded as `FAIL` (a case failed), `UNKNOWN`, `ERROR` or `TIMEOUT`.
 `signature = Ed25519(key, "intellectus/v1/operator\n" + body_bytes)`. The core
 parses `body` strictly. Every body has `project_id`, `nonce` (unique, replay
 protected), `issued_at` (unix seconds) and `op`:
+
+Operation fields sit flat beside `project_id`, `nonce`, `issued_at` and `op`
+(e.g. `{"project_id":"p","nonce":"n1","issued_at":1800000000,"op":"approve","action_digest":"sha256:…","tool_id":"promote_local","expires_at":1800003600}`).
+Node-creating ops return `{"ref":"kind:id@rev"}`; `register_test_manifest` and
+`register_environment` return `{"digest"}` and are referenced by bare id
+(`"T1"`, `"ENV1"`) in `open_task`. All ids and refs are strings.
 
 `set_policy{policy}`, `add_requirement{requirement_id,text,sensitivity}`,
 `add_assumption{assumption_id,text,context,literal?,sensitivity}`,

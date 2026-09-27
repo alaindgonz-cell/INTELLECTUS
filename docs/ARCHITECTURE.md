@@ -153,3 +153,8 @@ restart and is reconciled by an adapter read, never blindly re-executed.
    was written, because the provider API was not verified against primary
    documentation in this task. Assessments record mode SIMULATED/SHADOW and
    can never be mistaken for a live result.
+7. **Task scope of effects.** A successful `promote_local` completes its
+   task, after which the core accepts no new proposals for it. An external
+   effect on the *promoted* root (e.g. exporting it) therefore needs a new
+   operator-opened task. This is deliberate (a completed task cannot be
+   silently extended) but is a design decision the owner may want to revisit.
