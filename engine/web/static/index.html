@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="referrer" content="no-referrer">
+  <title>INTELLECTUS</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="style.css">
+  <script src="app.js" defer></script>
+</head>
+<body data-mobile-view="chat">
+  <a class="skip-link" href="#composer-input">Skip to message input</a>
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true"></span>
+      <span class="wordmark">INTELLECTUS</span>
+    </div>
+    <div class="pills" id="pills" role="group" aria-label="System status">
+      <button type="button" class="pill" id="pill-core" data-pop="core" aria-haspopup="dialog" aria-expanded="false">
+        <span class="dot" aria-hidden="true"></span><span class="pill-label">Core</span><span class="pill-value">…</span>
+      </button>
+      <button type="button" class="pill" id="pill-claude" data-pop="claude" aria-haspopup="dialog" aria-expanded="false">
+        <span class="dot" aria-hidden="true"></span><span class="pill-label">Claude</span><span class="pill-value">…</span>
+      </button>
+      <button type="button" class="pill" id="pill-jev" data-pop="jev" aria-haspopup="dialog" aria-expanded="false">
+        <span class="dot" aria-hidden="true"></span><span class="pill-label">Jev</span><span class="pill-value">…</span>
+      </button>
+      <button type="button" class="pill" id="pill-sandbox" data-pop="sandbox" aria-haspopup="dialog" aria-expanded="false">
+        <span class="dot" aria-hidden="true"></span><span class="pill-label">Sandbox</span><span class="pill-value">…</span>
+      </button>
+      <button type="button" class="pill" id="pill-usage" data-pop="usage" aria-haspopup="dialog" aria-expanded="false">
+        <span class="dot" aria-hidden="true"></span><span class="pill-label">Usage</span><span class="pill-value">…</span>
+      </button>
+    </div>
+    <div class="topbar-end">
+      <div class="jev-control" id="jev-control">
+        <div class="jev-row">
+          <span class="jev-title" id="jev-mode-label">Jev routing</span>
+          <div class="seg" role="radiogroup" aria-labelledby="jev-mode-label" aria-describedby="jev-mode-help">
+            <button type="button" role="radio" data-jev-mode="SHADOW" aria-checked="false">Shadow</button>
+            <button type="button" role="radio" data-jev-mode="LIVE" aria-checked="false">Live</button>
+            <button type="button" role="radio" data-jev-mode="OFF" aria-checked="false">Off</button>
+          </div>
+        </div>
+        <p class="jev-help" id="jev-mode-help">LIVE lets Jev choose routes when confident.</p>
+      </div>
+      <span class="conn" id="conn" role="status" data-state="connecting">
+        <span class="conn-dot" aria-hidden="true"></span><span class="conn-label">Connecting…</span>
+      </span>
+    </div>
+  </header>
+
+  <div class="notices" id="notices"></div>
+
+  <nav class="mobile-tabs" role="tablist" aria-label="Views" id="mobile-tabs">
+    <button type="button" role="tab" data-mview="chat" aria-selected="true">Chat</button>
+    <button type="button" role="tab" data-mview="activity" aria-selected="false">Activity</button>
+    <button type="button" role="tab" data-mview="tasks" aria-selected="false">Tasks</button>
+    <button type="button" role="tab" data-mview="files" aria-selected="false">Files</button>
+    <button type="button" role="tab" data-mview="events" aria-selected="false">Events</button>
+  </nav>
+
+  <main class="layout">
+    <section class="pane chat-pane" id="view-chat" aria-labelledby="chat-heading">
+      <div class="pane-head">
+        <h2 id="chat-heading">Chat</h2>
+        <span class="pane-sub" id="chat-sub">Proposals and approvals appear here</span>
+      </div>
+      <div class="scroll chat-scroll" id="chat-scroll">
+        <div class="empty-state" id="chat-empty" hidden>
+          <div class="empty-mark" aria-hidden="true"></div>
+          <h3>What should INTELLECTUS work on?</h3>
+          <p>Describe a change in plain language. INTELLECTUS drafts a proposal with acceptance tests; nothing runs until you approve it, and nothing reaches the approved tree until you approve the result.</p>
+          <div class="examples" id="examples" aria-label="Example prompts">
+            <button type="button" class="example">Write a Python function parse_page_size(raw) in src/page_size.py that accepts only 1–3 ASCII digits with value 1..100 and raises ValueError otherwise</button>
+            <button type="button" class="example">Add a slugify(text) helper in src/text.py</button>
+            <button type="button" class="example">What files are in the project?</button>
+          </div>
+        </div>
+        <ol class="messages" id="messages" role="log" aria-live="polite" aria-relevant="additions text" aria-label="Conversation"></ol>
+        <div class="typing" id="typing" hidden><span class="typing-dots" aria-hidden="true"><i></i><i></i><i></i></span><span>INTELLECTUS is working…</span></div>
+      </div>
+      <form class="composer" id="composer" autocomplete="off">
+        <label for="composer-input" class="sr-only">Message INTELLECTUS</label>
+        <div class="composer-box">
+          <textarea id="composer-input" rows="1" placeholder="Message INTELLECTUS…" aria-describedby="composer-hint"></textarea>
+          <button type="submit" class="btn btn-primary" id="send-btn">Send</button>
+        </div>
+        <p class="composer-hint" id="composer-hint">Enter to send · Shift+Enter for a new line</p>
+      </form>
+    </section>
+
+    <section class="pane work-pane" aria-labelledby="work-heading">
+      <div class="pane-head work-head">
+        <h2 id="work-heading">What INTELLECTUS is doing</h2>
+        <div class="tabs" role="tablist" aria-label="Work views" id="work-tabs">
+          <button type="button" role="tab" id="tab-activity" data-tab="activity" aria-controls="view-activity" aria-selected="true">Activity</button>
+          <button type="button" role="tab" id="tab-tasks" data-tab="tasks" aria-controls="view-tasks" aria-selected="false" tabindex="-1">Tasks</button>
+          <button type="button" role="tab" id="tab-files" data-tab="files" aria-controls="view-files" aria-selected="false" tabindex="-1">Files</button>
+          <button type="button" role="tab" id="tab-events" data-tab="events" aria-controls="view-events" aria-selected="false" tabindex="-1">Event log</button>
+        </div>
+      </div>
+
+      <div class="tabpanel" id="view-activity" role="tabpanel" aria-labelledby="tab-activity">
+        <div class="now-strip" id="now-strip"></div>
+        <div class="filter-bar" id="activity-filters" role="toolbar" aria-label="Filter activity"></div>
+        <div class="scroll" id="activity-scroll">
+          <ol class="timeline" id="timeline" aria-label="Activity timeline"></ol>
+          <p class="empty" id="activity-empty">No activity yet. When INTELLECTUS plans, writes code, runs tests or asks for approval, each step shows up here live.</p>
+        </div>
+        <button type="button" class="jump-latest" id="jump-latest" hidden>New activity ↓</button>
+      </div>
+
+      <div class="tabpanel" id="view-tasks" role="tabpanel" aria-labelledby="tab-tasks" hidden>
+        <div class="scroll" id="tasks-scroll">
+          <div id="tasks-list"></div>
+          <div id="task-detail" hidden></div>
+        </div>
+      </div>
+
+      <div class="tabpanel" id="view-files" role="tabpanel" aria-labelledby="tab-files" hidden>
+        <div class="toolbar" id="files-toolbar">
+          <div class="seg" role="group" aria-label="Files mode">
+            <button type="button" data-files-mode="tree" aria-pressed="true">Browse</button>
+            <button type="button" data-files-mode="diff" aria-pressed="false">Diff</button>
+          </div>
+          <label class="field" id="root-field">
+            <span>Root</span>
+            <select id="root-select"></select>
+          </label>
+          <span class="diff-selects" id="diff-selects" hidden>
+            <label class="field"><span>From</span><select id="diff-from"></select></label>
+            <label class="field"><span>To</span><select id="diff-to"></select></label>
+          </span>
+          <span class="toolbar-spacer"></span>
+          <button type="button" class="btn btn-secondary btn-sm" id="export-btn" title="Propose exporting the approved tree (needs its own approval)">Export approved tree…</button>
+        </div>
+        <div class="scroll files-scroll" id="files-body"></div>
+      </div>
+
+      <div class="tabpanel" id="view-events" role="tabpanel" aria-labelledby="tab-events" hidden>
+        <div class="scroll" id="events-scroll">
+          <div class="events-top" id="events-top"></div>
+          <div class="events-table" id="events-table" role="table" aria-label="Core event log">
+            <div class="ev-row ev-head" role="row">
+              <span role="columnheader">Seq</span>
+              <span role="columnheader">Type</span>
+              <span role="columnheader">Actor</span>
+              <span role="columnheader">Time</span>
+              <span role="columnheader">Summary</span>
+            </div>
+            <div id="events-rows" role="rowgroup"></div>
+          </div>
+          <div class="events-bottom" id="events-bottom"></div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <div class="popover" id="popover" role="dialog" aria-labelledby="popover-title" hidden></div>
+  <div class="toasts" id="toasts" role="status" aria-live="polite"></div>
+</body>
+</html>
